@@ -1,0 +1,3 @@
+# Python-only dependencies for the LL-HLS helper.
+# Core media bindings (PyGObject/PyCairo) come from apt-installed system packages,
+# so this file intentionally stays empty until additional PyPI modules are needed.
