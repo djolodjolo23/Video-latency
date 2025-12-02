@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "client": "node --loader ts-node/esm commons/client/client.ts"
+    "client": "node --loader ts-node/esm ll-hls/client/client.ts"
   },
   "keywords": [],
   "author": "",
