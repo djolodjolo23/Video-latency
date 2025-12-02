@@ -18,10 +18,16 @@ import argparse
 import logging
 import signal
 import sys
+import time
 import threading
+import json
+import os
+import re
+import socket
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from inotify_simple import INotify, flags
 
 from cli import build_arg_parser
 
@@ -40,6 +46,9 @@ except (ImportError, ValueError) as exc:  # pragma: no cover - import guard
 
 
 LOG = logging.getLogger("ll-hls")
+_TIMESTAMP_FILE = None  
+_SEGMENT_TIMESTAMPS = {} 
+_OUTPUT_DIR = None   
 
 
 def ensure_hlssink2_exists() -> None:
@@ -56,6 +65,27 @@ class QuietSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:  # pragma: no cover - delegate to logging module
         LOG.debug("HTTP %s", format % args)
+
+    def end_headers(self) -> None:  # pragma: no cover - simple header hook
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:  # pragma: no cover - preflight handler
+        self.send_response(204)
+        self.end_headers()
+    
+    def do_GET(self) -> None:
+        if self.path == "/timestamps.json":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            data = {"segments": _SEGMENT_TIMESTAMPS, "timestamp": time.time_ns()}
+            self.wfile.write(json.dumps(data).encode())
+        else:
+            super().do_GET()
 
 
 class ThreadedFileServer:
@@ -80,14 +110,46 @@ def build_pipeline_description(args: argparse.Namespace) -> str:
 
     pipeline = (
         f"{source} ! queue leaky=downstream max-size-buffers=1 ! "
-        f"videoconvert ! videoscale ! videorate ! {caps} ! "
+        f"videoconvert ! timeoverlay color=0xffff0000 valignment=top halignment=left ! "
+        f"videoscale ! videorate ! {caps} ! "
         f"x264enc tune=zerolatency speed-preset={args.speed_preset} bitrate={args.bitrate} "
         f"key-int-max={args.key_int_max} sliced-threads=true bframes=0 byte-stream=true aud=true ! "
-        "h264parse config-interval=-1 name=videoparse"
+        f"h264parse config-interval=-1 name=videoparse"
     )
 
     LOG.debug("Pipeline description: %s", pipeline)
     return pipeline
+
+def monitor_segments():
+    """Monitor the output directory for new segments and record their timestamps."""
+    global _SEGMENT_TIMESTAMPS, _OUTPUT_DIR
+    if not _OUTPUT_DIR:
+        return
+    
+    try:
+        inotify = INotify()
+        watch_flags = flags.CREATE | flags.CLOSE_WRITE
+        wd = inotify.add_watch(str(_OUTPUT_DIR), watch_flags)
+        LOG.info("Started inotify watch on %s for segment monitoring", _OUTPUT_DIR)
+        while True:
+            for event in inotify.read(timeout=1000):
+                if event.name and event.name.endswith('.ts'):
+                    if event.mask & flags.CLOSE_WRITE:
+                        match = re.search(r'segment_(\d+)\.ts', event.name)
+                        if match:
+                            segment_num = int(match.group(1))
+                            timestamp_ns = time.time_ns()
+                            _SEGMENT_TIMESTAMPS[segment_num] = timestamp_ns
+                            LOG.info(f"Recorded timestamp for segment {segment_num}: {timestamp_ns}")
+
+                            if len(_SEGMENT_TIMESTAMPS) > 20:
+                                min_key = min(_SEGMENT_TIMESTAMPS.keys())
+                                del _SEGMENT_TIMESTAMPS[min_key]
+
+    except ImportError:
+        LOG.error("inotify_simple module is required for segment monitoring. Please install it via pip.")
+    except Exception as e:
+        LOG.error(f"Error in segment monitoring thread: {e}")                            
 
 
 def set_property_if_available(element: Gst.Element, name: str, value) -> None:
@@ -181,6 +243,7 @@ def run_pipeline(pipeline: Gst.Pipeline) -> None:
 
 
 def main() -> None:
+    global _OUTPUT_DIR
     args = build_arg_parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -189,6 +252,17 @@ def main() -> None:
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    for old_segment in output_dir.glob("segment_*.ts"):
+        old_segment.unlink()
+        LOG.debug(f"Removed old segment: {old_segment.name}")
+    
+    old_playlist = output_dir / args.playlist_name
+    if old_playlist.exists():
+        old_playlist.unlink()
+        LOG.debug(f"Removed old playlist: {old_playlist.name}")
+    
+    _OUTPUT_DIR = output_dir
 
     playlist_path = output_dir / args.playlist_name
     segment_path = output_dir / f"{args.segment_prefix}_%05d.ts"
@@ -197,6 +271,32 @@ def main() -> None:
     pipeline = create_pipeline(args, playlist_path, segment_path, playlist_root)
     file_server = ThreadedFileServer(output_dir, args.http_host, args.http_port)
     file_server.start()
+    
+    LOG.info("=" * 60)
+    LOG.info("HLS stream is now available:")
+    LOG.info(f"Local: http://127.0.0.1:{args.http_port}/live.m3u8")
+    
+    try:
+        hostname = socket.gethostname()
+        local_ips = []
+        for ip in socket.getaddrinfo(hostname, None):
+            addr = ip[4][0]
+            if ':' not in addr and addr != '127.0.0.1':  
+                if addr not in local_ips:
+                    local_ips.append(addr)
+        
+        if local_ips:
+            LOG.info("Network:")
+            for ip in local_ips:
+                LOG.info(f"http://{ip}:{args.http_port}/live.m3u8")
+    except Exception as e:
+        LOG.debug(f"Could not determine network addresses: {e}")
+    
+    LOG.info("=" * 60)
+    
+    monitor_thread = threading.Thread(target=monitor_segments, daemon=True)
+    monitor_thread.start()
+    LOG.info("Started segment timestamp monitoring")
 
     try:
         run_pipeline(pipeline)

@@ -54,7 +54,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="output",
+        default=Path(__file__).parent / "output",
         type=Path,
         help="Directory where HLS segments and playlist will be written",
     )
