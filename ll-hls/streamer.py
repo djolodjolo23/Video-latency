@@ -18,7 +18,9 @@ import argparse
 import logging
 import signal
 import sys
+import time
 import threading
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +42,8 @@ except (ImportError, ValueError) as exc:  # pragma: no cover - import guard
 
 
 LOG = logging.getLogger("ll-hls")
+STAMP_INTERVAL_NS = int(0.5 * 1_000_000_000)  # stamp twice per second
+_LAST_STAMP_NS = 0
 
 
 def ensure_hlssink2_exists() -> None:
@@ -80,7 +84,7 @@ def build_pipeline_description(args: argparse.Namespace) -> str:
 
     pipeline = (
         f"{source} ! queue leaky=downstream max-size-buffers=1 ! "
-        f"videoconvert ! videoscale ! videorate ! {caps} ! "
+        f"videoconvert ! identity name=tsprobe signal-handoffs=true ! timeoverlay color=0xffff0000 valignment=top halignment=left ! videoscale ! videorate ! {caps} ! "
         f"x264enc tune=zerolatency speed-preset={args.speed_preset} bitrate={args.bitrate} "
         f"key-int-max={args.key_int_max} sliced-threads=true bframes=0 byte-stream=true aud=true ! "
         "h264parse config-interval=-1 name=videoparse"
@@ -88,6 +92,29 @@ def build_pipeline_description(args: argparse.Namespace) -> str:
 
     LOG.debug("Pipeline description: %s", pipeline)
     return pipeline
+
+def on_ts_handoff(_identity, buffer: Gst.Buffer, pad: Gst.Pad | None = None) -> None:
+    global _LAST_STAMP_NS
+    now_ns = time.time_ns()
+    if now_ns - _LAST_STAMP_NS < STAMP_INTERVAL_NS:
+        return
+    _LAST_STAMP_NS = now_ns
+
+    payload = now_ns.to_bytes(16, "big", signed=False)
+    payload_buffer = Gst.Buffer.new_wrapped(payload)
+    sample = Gst.Sample.new(payload_buffer, Gst.Caps.new_any(), None, None)
+    taglist = Gst.TagList.new_empty()
+    taglist.add_value(Gst.TagMergeMode.APPEND, Gst.TAG_PRIVATE_DATA, sample)
+    event = Gst.Event.new_tag(taglist)
+    if pad is not None:
+        pad.push_event(event)
+    LOG.debug("Injected timestamp metadata %d (buffer pts=%d)", now_ns, buffer.pts)
+
+def attach_timestamp_probe(pipeline: Gst.Pipeline) -> None:
+    identity = pipeline.get_by_name("tsprobe")
+    if identity is None:
+        raise RuntimeError("Identity element 'tsprobe' not found in pipeline")
+    identity.connect("handoff", on_ts_handoff)
 
 
 def set_property_if_available(element: Gst.Element, name: str, value) -> None:
@@ -116,6 +143,8 @@ def configure_hlssink(hlssink: Gst.Element, playlist_path: Path, segment_path: P
 def create_pipeline(args: argparse.Namespace, playlist_path: Path, segment_path: Path, playlist_root: str) -> Gst.Pipeline:
     pipeline_desc = build_pipeline_description(args)
     pipeline = Gst.parse_launch(pipeline_desc)
+
+    attach_timestamp_probe(pipeline)
 
     hlssink = Gst.ElementFactory.make("hlssink2", "hlssink")
     if hlssink is None:
