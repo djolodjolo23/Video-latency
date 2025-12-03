@@ -61,6 +61,17 @@ class QuietSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # pragma: no cover - delegate to logging module
         LOG.debug("HTTP %s", format % args)
 
+    # Allow cross-origin fetches so the in-browser client can pull the HLS playlist/segments.
+    def end_headers(self) -> None:  # pragma: no cover - simple header hook
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:  # pragma: no cover - preflight handler
+        self.send_response(204)
+        self.end_headers()
+
 
 class ThreadedFileServer:
     def __init__(self, directory: Path, host: str, port: int) -> None:
