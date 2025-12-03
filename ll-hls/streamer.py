@@ -104,7 +104,7 @@ def build_pipeline_description(args: argparse.Namespace) -> str:
     LOG.debug("Pipeline description: %s", pipeline)
     return pipeline
 
-def on_ts_handoff(_identity, buffer: Gst.Buffer, pad: Gst.Pad | None = None) -> None:
+def inject_timestamp_event(buffer: Gst.Buffer, pad: Gst.Pad) -> None:
     global _LAST_STAMP_NS
     now_ns = time.time_ns()
     if now_ns - _LAST_STAMP_NS < STAMP_INTERVAL_NS:
@@ -117,15 +117,20 @@ def on_ts_handoff(_identity, buffer: Gst.Buffer, pad: Gst.Pad | None = None) -> 
     taglist = Gst.TagList.new_empty()
     taglist.add_value(Gst.TagMergeMode.APPEND, Gst.TAG_PRIVATE_DATA, sample)
     event = Gst.Event.new_tag(taglist)
-    if pad is not None:
-        pad.push_event(event)
+    pad.push_event(event)
     LOG.debug("Injected timestamp metadata %d (buffer pts=%d)", now_ns, buffer.pts)
 
-def attach_timestamp_probe(pipeline: Gst.Pipeline) -> None:
-    identity = pipeline.get_by_name("tsprobe")
-    if identity is None:
-        raise RuntimeError("Identity element 'tsprobe' not found in pipeline")
-    identity.connect("handoff", on_ts_handoff)
+
+def attach_timestamp_probe(pad: Gst.Pad) -> None:
+    """Attach a pad probe right before hlssink so TAG events reach the muxer."""
+
+    def _on_buffer(_pad: Gst.Pad, info: Gst.PadProbeInfo, _user_data) -> Gst.PadProbeReturn:
+        buffer = info.get_buffer()
+        if buffer is not None:
+            inject_timestamp_event(buffer, pad)
+        return Gst.PadProbeReturn.OK
+
+    pad.add_probe(Gst.PadProbeType.BUFFER, _on_buffer, None)
 
 
 def set_property_if_available(element: Gst.Element, name: str, value) -> None:
@@ -178,6 +183,8 @@ def create_pipeline(args: argparse.Namespace, playlist_path: Path, segment_path:
 
     if parser_src.link(sink_pad) != Gst.PadLinkReturn.OK:
         raise RuntimeError("Failed to link h264parse to hlssink")
+
+    attach_timestamp_probe(parser_src)
 
     return pipeline
 
