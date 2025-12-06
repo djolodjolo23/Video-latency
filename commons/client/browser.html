@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HLS Latency Probe</title>
+  <style>
+    body { margin: 0; background: #000; color: #fff; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; height: 100vh; }
+    video { width: 90vw; max-width: 1200px; max-height: 80vh; background: #111; }
+    #latency { position: fixed; top: 12px; left: 12px; padding: 8px 10px; background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 6px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div id="latency">waiting…</div>
+  <video id="video" autoplay muted playsinline controls></video>
+
+  <script type="module">
+    import Hls from 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.mjs';
+
+    const urlParam = new URLSearchParams(location.search).get('src');
+    const STREAM_URL = urlParam || 'http://localhost:8080/live.m3u8';
+    const video = document.getElementById('video');
+    const latencyEl = document.getElementById('latency');
+
+    let segmentTimestamps = {};
+
+    async function fetchTimestamps() {
+      try {
+        const baseUrl = new URL(STREAM_URL).origin;
+        const resp = await fetch(`${baseUrl}/timestamps.json`);
+        const data = await resp.json();
+        segmentTimestamps = data.segments;
+      } catch (e) {
+        console.error('Failed to fetch timestamps:', e);
+      }
+    }
+
+    fetchTimestamps();
+    setInterval(fetchTimestamps, 500);
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true });
+      Object.assign(window, { hls, Hls, video });
+
+      hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
+        const frag = data.frag;
+        const match = frag.relurl.match(/segment_(\d+)\.ts/);
+        if (!match) return;
+
+        const segNum = parseInt(match[1], 10);
+        const productionNs = segmentTimestamps[segNum];
+        if (!productionNs) {
+          latencyEl.textContent = 'waiting…';
+          return;
+        }
+
+        const productionMs = Number(productionNs) / 1_000_000;
+        const clientMs = performance.now() + performance.timeOrigin;
+        const latencyMs = clientMs - productionMs;
+        const iso = new Date(productionMs).toISOString();
+
+        latencyEl.textContent = `${latencyMs.toFixed(1)} ms (segment ${segNum}, produced ${iso})`;
+        console.log('[LATENCY]', latencyMs.toFixed(1), 'ms', 'segment', segNum, 'produced', iso);
+      });
+
+      hls.loadSource(STREAM_URL);
+      hls.attachMedia(video);
+    } else {
+      latencyEl.textContent = 'Hls.js not supported';
+    }
+  </script>
+</body>
+</html>
