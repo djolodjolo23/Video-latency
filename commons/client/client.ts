@@ -6,6 +6,11 @@ import puppeteer from 'puppeteer-core';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const STREAM_URL = 'http://localhost:8080/live.m3u8';
+const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+
+if (!executablePath) {
+    throw new Error('Set PUPPETEER_EXECUTABLE_PATH to your Chrome/Chromium binary before running the client.');
+}
 
 const html = `
 <!DOCTYPE html>
@@ -16,6 +21,8 @@ const html = `
       import Hls from 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
       const video = document.getElementById('video');
       const hls = new Hls({ enableWorker: true });
+      // Expose for debugging in devtools.
+      Object.assign(window, { hls, Hls, video });
       window.reportLatency = latency => console.log('LATENCY', JSON.stringify(latency));
 
       hls.on(Hls.Events.FRAG_PARSING_METADATA, (_event, data) => {
@@ -41,7 +48,10 @@ const html = `
 `;
 
 async function main() {
-    const browser = await puppeteer.launch({ headless: 'new' });
+    const browser = await puppeteer.launch({
+        headless: true,
+        executablePath
+    });
     const page = await browser.newPage();
 
     page.on('console', msg => {
