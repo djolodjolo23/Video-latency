@@ -2,9 +2,7 @@ import argparse
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Minimal WebRTC loopback using aiortc + aiohttp"
-    )
+    parser = argparse.ArgumentParser(description="Minimal WebRTC loopback using aiortc + aiohttp")
     parser.add_argument("--cert-file", help="SSL certificate file (for HTTPS)")
     parser.add_argument("--key-file", help="SSL key file (for HTTPS)")
     parser.add_argument("--play-from", help="Read the media from a file and sent it.")
@@ -16,9 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         action="store_true",
     )
-    parser.add_argument(
-        "--host", default="0.0.0.0", help="Host for HTTP server (default: 0.0.0.0)"
-    )
+    parser.add_argument("--host", default="0.0.0.0", help="Host for HTTP server (default: 0.0.0.0)")
     parser.add_argument(
         "--port", type=int, default=8080, help="Port for HTTP server (default: 8080)"
     )
@@ -34,16 +30,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Capture format for the video device (default: v4l2).",
     )
     parser.add_argument(
+        "--video-input-format",
+        # default="mjpeg",
+        help="Pixel format for the video device, e.g. mjpeg or yuyv422 (passed to ffmpeg as -input_format).",
+    )
+    parser.add_argument(
         "--video-size",
         default="640x480",
         help="Frame size for the video device, e.g. 640x480.",
     )
     parser.add_argument(
-        "--audio-codec", help="Force a specific audio codec (e.g. audio/opus)"
+        "--framerate",
+        # default=30,
+        help="Capture framerate for the video device (e.g. 30). Leave unset to use the device default.",
     )
-    parser.add_argument(
-        "--video-codec", help="Force a specific video codec (e.g. video/H264)"
-    )
+    parser.add_argument("--audio-codec", help="Force a specific audio codec (e.g. audio/opus)")
+    parser.add_argument("--video-codec", help="Force a specific video codec (e.g. video/H264)")
     return parser
 
 
