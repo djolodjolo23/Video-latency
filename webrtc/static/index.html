@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>aiortc Loopback</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        background: linear-gradient(135deg, #0b1021, #13264d);
+        color: #eef2f7;
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        padding: 24px;
+        gap: 16px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      button {
+        background: #19c6c7;
+        color: #031020;
+        border: none;
+        padding: 10px 14px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: transform 120ms ease, box-shadow 120ms ease;
+      }
+      button:active {
+        transform: translateY(1px);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+      .video-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+        align-items: start;
+      }
+      video {
+        width: 50%;
+        background: #0f192f;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      }
+      .panel {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 12px 14px;
+      }
+      .logs {
+        max-height: 160px;
+        overflow: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        line-height: 1.4;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <div style="font-size: 20px; font-weight: 700">Python + WebRTC Server Camera</div>
+        <div style="opacity: 0.75">Receive video directly from the Linux host running this server.</div>
+      </div>
+      <button id="start">Start Stream</button>
+    </header>
+
+    <div class="video-grid">
+      <div class="panel">
+        <div style="margin-bottom: 6px; font-weight: 600">Server camera</div>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="margin-bottom: 6px; font-weight: 600">Log</div>
+      <div id="logs" class="logs"></div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+      const startBtn = document.getElementById("start");
+      const remoteVideo = document.getElementById("remoteVideo");
+      const logEl = document.getElementById("logs");
+
+      let pc;
+      const socket = io();
+
+      const log = (msg) => {
+        const time = new Date().toLocaleTimeString();
+        const line = document.createElement("div");
+        line.textContent = `[${time}] ${msg}`;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      socket.on("connect", () => {
+        log("Socket.IO connected");
+      });
+
+      socket.on("connect_error", (err) => {
+        log(`Socket.IO connect error: ${err.message}`);
+        startBtn.disabled = false;
+      });
+
+      socket.on("answer", async (answer) => {
+        log("Answer received via Socket.IO");
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        log("Stream established. You should see remote video.");
+      });
+
+      socket.on("offer_error", (payload) => {
+        const message = payload?.message || "Unknown server error";
+        log(`Server error: ${message}`);
+        startBtn.disabled = false;
+      });
+
+      async function start() {
+        startBtn.disabled = true;
+        log("Creating receive-only peer connection...");
+
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            return;
+          }
+          // Once gathering completes, send the offer.
+          sendOffer(pc.localDescription);
+        };
+
+        pc.ontrack = (event) => {
+          log(`Remote track received: ${event.track.kind}`);
+          remoteVideo.srcObject = event.streams[0];
+        };
+
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("audio", { direction: "recvonly" });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log("Local offer created, gathering ICE...");
+      }
+
+      function sendOffer(desc) {
+        log("Sending offer via Socket.IO...");
+        socket.emit("offer", { sdp: desc.sdp, type: desc.type });
+      }
+
+      startBtn.addEventListener("click", start);
+    </script>
+  </body>
+</html>

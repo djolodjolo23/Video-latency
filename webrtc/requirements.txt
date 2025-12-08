@@ -1,0 +1,3 @@
+aiohttp
+aiortc
+python-socketio[client]
