@@ -350,6 +350,7 @@ def create_pipeline(args: argparse.Namespace, segment_path: Path, chunk_duration
         init_location = str(output_dir / "init%05d.mp4")
         
         # hlscmafsink requires stream-format=avc for H.264
+        # Add identity element with signal-handoffs to add reference timestamp meta
         pipeline_str = (
             f"{source} ! queue leaky=downstream max-size-buffers=1 ! "
             f"videoconvert ! timeoverlay color=0xffff0000 valignment=top halignment=left ! "
@@ -357,6 +358,7 @@ def create_pipeline(args: argparse.Namespace, segment_path: Path, chunk_duration
             f"x264enc tune=zerolatency speed-preset={args.speed_preset} bitrate={args.bitrate} "
             f"key-int-max={args.key_int_max} sliced-threads=true bframes=0 ! "
             f"h264parse ! video/x-h264,stream-format=avc,alignment=au ! "
+            f"identity name=ts_injector signal-handoffs=true ! "
             f"hlscmafsink name=hlssink "
             f"location={segment_location} "
             f"init-location={init_location} "
@@ -403,6 +405,32 @@ def create_pipeline(args: argparse.Namespace, segment_path: Path, chunk_duration
                 LOG.warning("Could not access internal muxer element in hlscmafsink")
         else:
             LOG.warning("Could not find hlssink element in pipeline")
+        
+        # Connect to identity element's handoff signal to inject GstReferenceTimestampMeta
+        # The handoff signal provides writable buffer access
+        ts_injector = pipeline.get_by_name("ts_injector")
+        if ts_injector:
+            # Create caps for UNIX timestamp reference
+            unix_caps = Gst.Caps.from_string("timestamp/x-unix")
+            
+            def on_handoff(identity, buffer):
+                """Add GstReferenceTimestampMeta with current wall-clock time."""
+                # Get current wall-clock time in nanoseconds since UNIX epoch
+                wall_clock_ns = time.time_ns()
+                
+                # Add reference timestamp meta
+                try:
+                    buffer.add_reference_timestamp_meta(unix_caps, wall_clock_ns, Gst.CLOCK_TIME_NONE)
+                except Exception as e:
+                    # Log only once to avoid spam
+                    if not hasattr(on_handoff, '_logged'):
+                        LOG.warning("Could not add reference timestamp meta: %s", e)
+                        on_handoff._logged = True
+            
+            ts_injector.connect("handoff", on_handoff)
+            LOG.info("Connected to identity handoff signal for prft box embedding")
+        else:
+            LOG.warning("Could not find ts_injector identity element")
     
     return pipeline
 
