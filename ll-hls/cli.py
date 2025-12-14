@@ -74,6 +74,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=positive_float,
         help="Length of each segment in seconds (keep low for LL-HLS)",
     )
+    parser.add_argument(
+        "--part-duration",
+        default=0.333,
+        type=positive_float,
+        help="Duration of LL-HLS parts in seconds",
+    )
     parser.add_argument("--http-host", default="0.0.0.0", help="HTTP server bind address")
     parser.add_argument("--http-port", default=8080, type=positive_int, help="HTTP server port")
     parser.add_argument(

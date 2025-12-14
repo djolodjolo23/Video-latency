@@ -2,11 +2,12 @@
 
 This folder contains the LL-HLS helper (`streamer.py`). It builds a GStreamer
 pipeline which captures frames from a webcam (or a synthetic test pattern),
-encodes them with latency-focused settings, produces LL-HLS compatible CMAF
-segments via `hlssink2`, and serves them through a lightweight HTTP server so
-that another device can tune in using a standard HLS player. The client-side
-measurement tooling is shared across transports and lives in the common helpers
-directory (outside this folder).
+encodes them with latency-focused settings, produces fragmented MP4 CMAF chunks
+via `splitmuxsink`+`mp4mux`, writes a custom LL-HLS playlist (with `#EXT-X-PART`
+and blocking reload support), and serves everything through a lightweight HTTP
+server so that another device can tune in using a standard LL-HLS player. The
+client-side measurement tooling is shared across transports and lives in the
+common helpers directory (outside this folder).
 
 ## Setup (one time)
 
@@ -51,24 +52,28 @@ The helper exposes several CLI switches so you can trade latency vs quality:
 | `--framerate 30` | Frames per second. |
 | `--bitrate 2500` | Encoder bitrate in kbit/s. |
 | `--segment-duration 1.0` | Segment length (keep ≤1s for LL-HLS). |
+| `--part-duration 0.333` | Target CMAF part duration (the helper emits one part per segment). |
 | `--playlist-length 6` | Visible segments in the playlist. |
 | `--max-files 20` | How many segments to retain on disk. |
 | `--test-src` | Replace the webcam with a moving colorbars pattern. |
 | `--public-url http://ip:8080` | URL announced inside `#EXT-X-MAP`/segments (set when binding `0.0.0.0`). |
 
-Run `python3 streamer.py --help` to see the full list.
+Run `python3 streamer.py --help` to see the full list. The generated playlist
+supports **blocking reloads**: LL-HLS clients can append `?wait=500&version=<n>`
+when polling `live.m3u8` to keep the HTTP connection open until newer parts are
+available (or 500 ms elapse).
 
 ## Timestamp Injection & Latency Measurement
 
 The streamer provides timestamp tracking for latency measurements via a JSON sidecar approach:
 
-- **Segment monitoring**: Uses `inotify` (Linux filesystem events) to detect new segment files immediately
+- **Segment monitoring**: Uses `inotify` (Linux filesystem events) to detect new CMAF `.m4s` files immediately
 - **Timestamp capture**: Records Unix nanosecond timestamp when each segment file is fully written (`CLOSE_WRITE` event)
 - **JSON endpoint**: Serves timestamp mapping at `/timestamps.json` (updated in real-time)
 - **Client correlation**: Clients poll the endpoint every 500ms and match segment numbers to timestamps
 - **Fallback**: Falls back to polling-based monitoring if `inotify` is unavailable
 
-This out-of-band approach works around HLS/MPEG-TS limitations where GStreamer's `hlssink2` doesn't support embedding ID3 tags or custom metadata in segments.
+This out-of-band approach works around HLS/CMAF limitations where the writer doesn't expose ID3 tagging hooks.
 
 **Implementation details:**
 - Event-driven monitoring via `inotify` for zero polling overhead
@@ -91,5 +96,5 @@ The script wires up the following pipeline:
 
 ```
 v4l2src → videoconvert → videoscale → videorate → x264enc (zerolatency)
-       → h264parse → hlssink2 (writes CMAF/HLS parts) → HTTP file server
+       → h264parse → splitmuxsink+mp4mux (writes CMAF fragments) → HTTP file server
 ```
