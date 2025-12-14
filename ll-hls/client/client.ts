@@ -22,12 +22,25 @@ async function main() {
         const message = err instanceof Error ? err.message : String(err);
         console.error('[PAGEERROR]', message);
     });
+    
     page.on('console', msg => {
-        if (msg.type() === 'log' && msg.text().startsWith('LATENCY')) {
-            const data = JSON.parse(msg.text().slice('LATENCY '.length));
-            console.log(`[LATENCY] ${data.latencyMs.toFixed(1)} ms (produced at ${data.productionIso})`);
+        const text = msg.text();
+        if (msg.type() === 'log' && text.startsWith('LATENCY ')) {
+            try {
+                const jsonStr = text.slice('LATENCY '.length);
+                const data = JSON.parse(jsonStr);
+                const bufInfo = data.bufferAheadSec !== undefined 
+                    ? ` | buffer: ${data.bufferAheadSec.toFixed(2)}s (~${data.fragmentsInBuffer.toFixed(1)} segs)`
+                    : '';
+                console.log(`[LATENCY] ${data.latencyMs.toFixed(1)} ms | segment: ${data.segmentFilename}${bufInfo}`);
+            } catch (e) {
+                console.error('[PARSE_ERROR] Failed to parse latency data:', text);
+            }
+        } else if (text.startsWith('[DEBUG]')) {
+            // Forward debug messages
+            console.log(text);
         } else {
-            console.log('[BROWSER]', msg.text());
+            console.log('[BROWSER]', text);
         }
     });
 

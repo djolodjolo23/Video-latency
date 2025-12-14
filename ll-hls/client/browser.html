@@ -6,7 +6,7 @@
   <style>
     body { margin: 0; background: #000; color: #fff; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; height: 100vh; }
     video { width: 90vw; max-width: 1200px; max-height: 80vh; background: #111; }
-    #latency { position: fixed; top: 12px; left: 12px; padding: 8px 10px; background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 6px; font-family: monospace; }
+    #latency { position: fixed; top: 12px; left: 12px; padding: 8px 10px; background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 6px; font-family: monospace; white-space: pre-line; }
   </style>
 </head>
 <body>
@@ -38,17 +38,54 @@
     setInterval(fetchTimestamps, 500);
 
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true });
+      const hls = new Hls({ 
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 90,
+        // LL-HLS tuning - these affect buffer/latency tradeoff
+        liveSyncDurationCount: 1,      // number of segments to stay behind live edge (default: 3)
+        liveMaxLatencyDurationCount: 6, // max segments behind before seeking (default: Infinity)
+        // You can also use time-based settings:
+        // liveSyncDuration: 3,         // seconds behind live edge
+        // liveMaxLatencyDuration: 6,   // max seconds behind before seeking
+      });
       Object.assign(window, { hls, Hls, video });
+
+      // Helper to get buffer info
+      function getBufferInfo() {
+        if (!video.buffered.length) return { start: 0, end: 0, length: 0, ahead: 0 };
+        const currentTime = video.currentTime;
+        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+        const bufferedStart = video.buffered.start(0);
+        return {
+          start: bufferedStart,
+          end: bufferedEnd,
+          length: bufferedEnd - bufferedStart,
+          ahead: bufferedEnd - currentTime, // how much is buffered ahead of playhead
+        };
+      }
 
       hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
         const frag = data.frag;
-        const match = frag.relurl.match(/segment_(\d+)\.ts/);
-        if (!match) return;
+        const relurl = frag.relurl;
+        
+        // Match both .ts and .m4s segment formats with various naming patterns
+        // e.g., "segment00001.m4s", "segment_00001.ts", "video00001.m4s"
+        const match = relurl.match(/([a-zA-Z_-]+)(\d{5})\.(ts|m4s)/);
+        if (!match) {
+          console.log('[DEBUG] No match for segment URL:', relurl);
+          return;
+        }
 
-        const segNum = parseInt(match[1], 10);
-        const productionNs = segmentTimestamps[segNum];
+        const prefix = match[1];
+        const segNum = match[2]; // Keep as string with leading zeros
+        const ext = match[3];
+        const segmentFilename = `${prefix}${segNum}.${ext}`;
+        
+        // Look up timestamp by filename (dictionary keys are filenames)
+        const productionNs = segmentTimestamps[segmentFilename];
         if (!productionNs) {
+          console.log('[DEBUG] No timestamp for segment:', segmentFilename, 'Available:', Object.keys(segmentTimestamps));
           latencyEl.textContent = 'waiting…';
           return;
         }
@@ -58,8 +95,32 @@
         const latencyMs = clientMs - productionMs;
         const iso = new Date(productionMs).toISOString();
 
-        latencyEl.textContent = `${latencyMs.toFixed(1)} ms (segment ${segNum}, produced ${iso})`;
-        console.log('[LATENCY]', latencyMs.toFixed(1), 'ms', 'segment', segNum, 'produced', iso);
+        // Get buffer info
+        const buf = getBufferInfo();
+        const hlsLatency = hls.latency; // hls.js calculated latency (if available)
+        const hlsLevelDetails = hls.levels?.[hls.currentLevel]?.details;
+        const targetDuration = hlsLevelDetails?.targetduration || '?';
+        const partTarget = hlsLevelDetails?.partTarget || '?';
+        const fragmentsInBuffer = buf.ahead / (frag.duration || 1);
+
+        latencyEl.textContent = `Latency: ${latencyMs.toFixed(0)} ms
+Buffer ahead: ${buf.ahead.toFixed(2)}s (~${fragmentsInBuffer.toFixed(1)} segments)
+Total buffer: ${buf.length.toFixed(2)}s
+Segment: ${segmentFilename} (${frag.duration?.toFixed(2) || '?'}s)
+Target duration: ${targetDuration}s | Part target: ${partTarget}s`;
+        
+        // Output structured JSON for Puppeteer to parse
+        console.log('LATENCY ' + JSON.stringify({
+          latencyMs: latencyMs,
+          productionIso: iso,
+          segmentFilename: segmentFilename,
+          productionNs: productionNs,
+          clientMs: clientMs,
+          bufferAheadSec: buf.ahead,
+          bufferTotalSec: buf.length,
+          segmentDuration: frag.duration,
+          fragmentsInBuffer: fragmentsInBuffer
+        }));
       });
 
       hls.loadSource(STREAM_URL);
