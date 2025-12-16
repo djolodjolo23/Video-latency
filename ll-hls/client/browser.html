@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HLS Latency Probe</title>
+  <style>
+    body { margin: 0; background: #000; color: #fff; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; height: 100vh; }
+    video { width: 90vw; max-width: 1200px; max-height: 80vh; background: #111; }
+    #latency { position: fixed; top: 12px; left: 12px; padding: 8px 10px; background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 6px; font-family: monospace; white-space: pre-line; }
+  </style>
+</head>
+<body>
+  <div id="latency">waiting…</div>
+  <video id="video" autoplay muted playsinline controls></video>
+
+  <script type="module">
+    import Hls from 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.mjs';
+
+    const urlParam = new URLSearchParams(location.search).get('src');
+    const STREAM_URL = urlParam || 'http://localhost:8080/live.m3u8';
+    const video = document.getElementById('video');
+    const latencyEl = document.getElementById('latency');
+
+    let segmentTimestamps = {};
+    let partTimestamps = {};
+
+    async function fetchTimestamps() {
+      try {
+        const baseUrl = new URL(STREAM_URL).origin;
+        const resp = await fetch(`${baseUrl}/timestamps.json`);
+        const data = await resp.json();
+        // Support both old format (flat object) and new format (nested segments/parts)
+        if (data.segments) {
+          segmentTimestamps = data.segments;
+          partTimestamps = data.parts || {};
+        } else {
+          // Old format - data is the segments directly
+          segmentTimestamps = data;
+        }
+      } catch (e) {
+        console.error('Failed to fetch timestamps:', e);
+      }
+    }
+
+    fetchTimestamps();
+    setInterval(fetchTimestamps, 500);
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ 
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 30,
+        // Aggressive LL-HLS tuning for ~1-2s latency
+        liveSyncDurationCount: 1,       // stay 1 segment behind live edge
+        liveMaxLatencyDurationCount: 3, // seek if more than 3 segments behind
+        maxLiveSyncPlaybackRate: 1.5,   // speed up playback to catch up
+        // Part-based loading for true low latency
+        progressive: true,              // enable progressive downloading
+        // Reduce initial buffering
+        maxBufferLength: 2,             // max buffer ahead in seconds
+        maxMaxBufferLength: 4,          // absolute max buffer
+        maxBufferSize: 2 * 1000 * 1000, // 2MB max buffer size
+        maxBufferHole: 0.1,             // tolerate small gaps
+        // Faster level switching
+        abrEwmaDefaultEstimate: 5000000, // assume 5Mbps initially
+      });
+      Object.assign(window, { hls, Hls, video });
+
+      // Helper to get buffer info
+      function getBufferInfo() {
+        if (!video.buffered.length) return { start: 0, end: 0, length: 0, ahead: 0 };
+        const currentTime = video.currentTime;
+        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+        const bufferedStart = video.buffered.start(0);
+        return {
+          start: bufferedStart,
+          end: bufferedEnd,
+          length: bufferedEnd - bufferedStart,
+          ahead: bufferedEnd - currentTime, // how much is buffered ahead of playhead
+        };
+      }
+
+      hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
+        const frag = data.frag;
+        const relurl = frag.relurl;
+        
+        // Match both .ts and .m4s segment formats with various naming patterns
+        // e.g., "segment00001.m4s", "segment_00001.ts", "video00001.m4s"
+        const match = relurl.match(/([a-zA-Z_-]+)(\d{5})\.(ts|m4s)/);
+        if (!match) {
+          console.log('[DEBUG] No match for segment URL:', relurl);
+          return;
+        }
+
+        const prefix = match[1];
+        const segNum = match[2]; // Keep as string with leading zeros
+        const ext = match[3];
+        const segmentFilename = `${prefix}${segNum}.${ext}`;
+        
+        // Look up timestamp by filename (dictionary keys are filenames)
+        const productionNs = segmentTimestamps[segmentFilename];
+        if (!productionNs) {
+          console.log('[DEBUG] No timestamp for segment:', segmentFilename, 'Available:', Object.keys(segmentTimestamps));
+          latencyEl.textContent = 'waiting…';
+          return;
+        }
+
+        const productionMs = Number(productionNs) / 1_000_000;
+        const clientMs = performance.now() + performance.timeOrigin;
+        const latencyMs = clientMs - productionMs;
+        const iso = new Date(productionMs).toISOString();
+
+        // Get buffer info
+        const buf = getBufferInfo();
+        const hlsLatency = hls.latency; // hls.js calculated latency (if available)
+        const hlsLevelDetails = hls.levels?.[hls.currentLevel]?.details;
+        const targetDuration = hlsLevelDetails?.targetduration || '?';
+        const partTarget = hlsLevelDetails?.partTarget || '?';
+        const fragmentsInBuffer = buf.ahead / (frag.duration || 1);
+
+        latencyEl.textContent = `Latency: ${latencyMs.toFixed(0)} ms
+Buffer ahead: ${buf.ahead.toFixed(2)}s (~${fragmentsInBuffer.toFixed(1)} segments)
+Total buffer: ${buf.length.toFixed(2)}s
+Segment: ${segmentFilename} (${frag.duration?.toFixed(2) || '?'}s)
+Target duration: ${targetDuration}s | Part target: ${partTarget}s`;
+        
+        // Output structured JSON for Puppeteer to parse
+        console.log('LATENCY ' + JSON.stringify({
+          latencyMs: latencyMs,
+          productionIso: iso,
+          segmentFilename: segmentFilename,
+          productionNs: productionNs,
+          clientMs: clientMs,
+          bufferAheadSec: buf.ahead,
+          bufferTotalSec: buf.length,
+          segmentDuration: frag.duration,
+          fragmentsInBuffer: fragmentsInBuffer
+        }));
+      });
+
+      hls.loadSource(STREAM_URL);
+      hls.attachMedia(video);
+    } else {
+      latencyEl.textContent = 'Hls.js not supported';
+    }
+  </script>
+</body>
+</html>
