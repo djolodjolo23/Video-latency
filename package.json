@@ -6,7 +6,11 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "client": "node --loader ts-node/esm ll-hls/client/client.ts"
+    "client": "node --loader ts-node/esm ll-hls/client/client.ts",
+    "qoe": "npx tsx ll-hls/client/qoe-benchmark.ts",
+    "qoe:5": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 5",
+    "qoe:10": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 10",
+    "qoe:20": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 20"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +18,7 @@
   "dependencies": {
     "puppeteer-core": "^24.32.0",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }
