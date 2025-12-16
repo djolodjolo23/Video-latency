@@ -302,6 +302,133 @@ class SimpleHLSServer:
 
 ---
 
+## GStreamer Plugin Investigation
+
+We investigated whether full Apple LL-HLS implementation was feasible with our GStreamer-based pipeline.
+
+### Available Plugins
+
+| Plugin | Element | Purpose |
+|--------|---------|---------|
+| `hlssink3` | `hlscmafsink` | HLS CMAF sink (used in our implementation) |
+| `isobmff` | `cmafmux` | Low-level CMAF muxer with chunk support |
+
+### hlscmafsink Analysis
+
+```
+$ gst-inspect-1.0 hlscmafsink
+
+Plugin: hlssink3 (version 0.15.0-alpha.1)
+Key Properties:
+  location          : "segment%05d.m4s"     (fragment file location)
+  init-location     : "init%05d.mp4"        (init segment location)  
+  target-duration   : 15 seconds            (segment duration)
+  latency           : 7500000000 ns         (pipeline latency)
+```
+
+**Finding**: `hlscmafsink` produces **one complete `.m4s` file per fragment**. It does NOT generate separate part files required for LL-HLS.
+
+### cmafmux Analysis
+
+The underlying `cmafmux` element (from `isobmff` plugin) has promising chunk support:
+
+```
+$ gst-inspect-1.0 cmafmux
+
+chunk-duration    : Duration for each FMP4 chunk (nanoseconds)
+                    Default: 18446744073709551615 (disabled)
+                    
+chunk-mode        : Mode to control chunking
+                    (0): none      - None
+                    (1): duration  - Duration-based chunks
+                    (2): keyframe  - Keyframe-based chunks
+                    
+fragment-duration : Duration for each parent fragment (nanoseconds)
+                    Default: 10000000000 (10 seconds)
+                    
+emit-signals      : Send signals when data is available
+                    Default: false
+```
+
+**Finding**: `cmafmux` DOES support CMAF chunks (equivalent to LL-HLS parts) via the `chunk-duration` and `chunk-mode` properties.
+
+### The Gap
+
+While `cmafmux` can produce chunked output internally, `hlscmafsink` does not expose these chunks as separate files:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     GStreamer LL-HLS Status                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   hlscmafsink wraps cmafmux but:                               │
+│   ┌───────────────────────────────────────────────────────┐    │
+│   │  cmafmux                        hlscmafsink           │    │
+│   │  ┌──────────┐                   ┌──────────────────┐  │    │
+│   │  │ chunk 0  │──┐                │                  │  │    │
+│   │  │ chunk 1  │──┼── combined ───▶│  segment001.m4s  │  │    │
+│   │  │ chunk 2  │──┘   internally   │  (single file)   │  │    │
+│   │  └──────────┘                   └──────────────────┘  │    │
+│   └───────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   LL-HLS REQUIRES:              WHAT WE GET:                   │
+│   segment001.0.m4s (part 0)     segment00001.m4s (complete)    │
+│   segment001.1.m4s (part 1)     segment00002.m4s (complete)    │
+│   segment001.2.m4s (part 2)     ...                            │
+│   segment001.m4s   (parent)                                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Theoretical Path to Full LL-HLS
+
+Based on community guidance, full LL-HLS IS technically achievable by:
+
+1. **Using `cmafmux` directly** (bypass `hlscmafsink`)
+2. **Configuring chunk output**:
+   ```python
+   cmafmux.set_property("chunk-duration", 200000000)  # 200ms
+   cmafmux.set_property("chunk-mode", 1)  # duration-based
+   cmafmux.set_property("emit-signals", True)
+   ```
+3. **Connecting to `appsink`** to receive chunk data
+4. **Writing chunks to separate files** manually
+5. **Generating HLS manifest yourself** with `EXT-X-PART` tags
+6. **Implementing async HTTP server** for blocking playlist requests
+
+### Implementation Effort Estimate
+
+| Component | Effort | Notes |
+|-----------|--------|-------|
+| Replace hlscmafsink with cmafmux + appsink | 1-2 days | Pipeline restructuring |
+| Parse CMAF chunks from muxer output | 1-2 days | Understand moof/mdat structure |
+| Write chunks as individual part files | 1 day | File management |
+| Manual HLS playlist generation | 1-2 days | EXT-X-PART, preload hints |
+| Async HTTP server (aiohttp) | 1 day | Blocking requests |
+| Testing & edge cases | 2-3 days | Timing, cleanup, error handling |
+| **Total** | **7-12 days** | |
+
+### Why We Chose Not to Implement Full LL-HLS
+
+| Factor | Assessment |
+|--------|------------|
+| **Time constraint** | Project timeline does not allow 7-12 days additional development |
+| **Current latency** | ~1.3 seconds is acceptable for our use case |
+| **Potential improvement** | Full LL-HLS would save ~200-400ms (modest gain) |
+| **Complexity** | Requires understanding CMAF internals, custom muxing |
+| **Maintenance burden** | Custom implementation harder to maintain than using hlscmafsink |
+| **Player requirements** | Current approach works with any HLS player |
+
+### GStreamer LL-HLS Support Status
+
+Note: GStreamer 1.24+ added LL-HLS support to `hlsdemux2` (the **playback** side):
+
+> "Adaptive Streaming improvements and Low-Latency HLS (LL-HLS) support - hlsdemux2 now supports Low-Latency HLS (LL-HLS)"
+
+However, this is for **consuming** LL-HLS streams, not **producing** them. The server-side tooling (`hlscmafsink`) does not yet have integrated LL-HLS part generation.
+
+---
+
 ## Conclusion
 
 Our short-segment HLS approach is a pragmatic choice that:
@@ -312,9 +439,26 @@ Our short-segment HLS approach is a pragmatic choice that:
 4. **Works with any HLS player** without special requirements
 5. **Is easier to debug and maintain** with standard tools
 
-While Apple LL-HLS provides additional benefits for large-scale CDN deployments, the added complexity is not justified for our local network streaming use case with time constraints.
+### Why Short-Segment HLS Works
 
-For applications requiring:
-- Global CDN distribution → Consider full LL-HLS
-- Sub-500ms latency → Consider WebRTC or WebTransport
-- Local network with ~1-2s latency → Short-segment HLS is sufficient ✓
+| Aspect | Explanation |
+|--------|-------------|
+| **Latency** | 0.3s segments achieve ~1.3s end-to-end latency, comparable to LL-HLS |
+| **Simplicity** | Uses `hlscmafsink` out-of-the-box, no custom code |
+| **Compatibility** | Standard HLS tags work with all players |
+| **Reliability** | Proven GStreamer pipeline, minimal moving parts |
+
+### When to Consider Full LL-HLS
+
+Full LL-HLS implementation would be justified if:
+- **CDN deployment** is required (blocking requests reduce edge load)
+- **Every millisecond matters** (broadcast, sports, betting)
+- **Dedicated development time** is available (2+ weeks)
+- **LL-HLS player compatibility** is specifically required
+
+### Future Possibility
+
+If GStreamer's `hlscmafsink` adds native LL-HLS part generation in the future, migration would be straightforward. The community has indicated this is technically possible using `cmafmux` with manual manifest generation.
+
+For our current use case (local network streaming with ~1-2s latency tolerance), short-segment HLS is the right engineering trade-off.
+
