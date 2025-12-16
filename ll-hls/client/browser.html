@@ -22,13 +22,21 @@
     const latencyEl = document.getElementById('latency');
 
     let segmentTimestamps = {};
+    let partTimestamps = {};
 
     async function fetchTimestamps() {
       try {
         const baseUrl = new URL(STREAM_URL).origin;
         const resp = await fetch(`${baseUrl}/timestamps.json`);
         const data = await resp.json();
-        segmentTimestamps = data.segments;
+        // Support both old format (flat object) and new format (nested segments/parts)
+        if (data.segments) {
+          segmentTimestamps = data.segments;
+          partTimestamps = data.parts || {};
+        } else {
+          // Old format - data is the segments directly
+          segmentTimestamps = data;
+        }
       } catch (e) {
         console.error('Failed to fetch timestamps:', e);
       }
@@ -41,13 +49,20 @@
       const hls = new Hls({ 
         enableWorker: true,
         lowLatencyMode: true,
-        backBufferLength: 90,
-        // LL-HLS tuning - these affect buffer/latency tradeoff
-        liveSyncDurationCount: 1,      // number of segments to stay behind live edge (default: 3)
-        liveMaxLatencyDurationCount: 6, // max segments behind before seeking (default: Infinity)
-        // You can also use time-based settings:
-        // liveSyncDuration: 3,         // seconds behind live edge
-        // liveMaxLatencyDuration: 6,   // max seconds behind before seeking
+        backBufferLength: 30,
+        // Aggressive LL-HLS tuning for ~1-2s latency
+        liveSyncDurationCount: 1,       // stay 1 segment behind live edge
+        liveMaxLatencyDurationCount: 3, // seek if more than 3 segments behind
+        maxLiveSyncPlaybackRate: 1.5,   // speed up playback to catch up
+        // Part-based loading for true low latency
+        progressive: true,              // enable progressive downloading
+        // Reduce initial buffering
+        maxBufferLength: 2,             // max buffer ahead in seconds
+        maxMaxBufferLength: 4,          // absolute max buffer
+        maxBufferSize: 2 * 1000 * 1000, // 2MB max buffer size
+        maxBufferHole: 0.1,             // tolerate small gaps
+        // Faster level switching
+        abrEwmaDefaultEstimate: 5000000, // assume 5Mbps initially
       });
       Object.assign(window, { hls, Hls, video });
 

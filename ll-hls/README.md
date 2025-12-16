@@ -1,15 +1,33 @@
 # Low-latency HLS webcam streaming
 
-This folder contains the LL-HLS helper (`streamer.py`). It builds a GStreamer
-pipeline which captures frames from a webcam (or a synthetic test pattern),
-encodes them with latency-focused settings, produces fragmented MP4 CMAF chunks
-via `splitmuxsink`+`mp4mux`, writes a custom LL-HLS playlist (with `#EXT-X-PART`
-and blocking reload support), and serves everything through a lightweight HTTP
-server so that another device can tune in using a standard LL-HLS player. The
-client-side measurement tooling is shared across transports and lives in the
-common helpers directory (outside this folder).
+This folder contains two LL-HLS streamer implementations:
 
-## Setup (one time)
+1. **`streamer.py`** - GStreamer-based, short-segment HLS (CMAF)
+2. **`streamer_biim.py`** - True LL-HLS with partial segments using biim library
+
+## Quick Comparison
+
+| Feature | `streamer.py` (GStreamer) | `streamer_biim.py` (biim) |
+|---------|---------------------------|---------------------------|
+| Partial segments (`EXT-X-PART`) | ❌ | ✅ |
+| Blocking playlist reload | Limited | ✅ Full support |
+| Preload hints | ❌ | ✅ |
+| In-memory serving | ❌ (disk-based) | ✅ |
+| Expected latency | ~1-2s | ~0.5-1s |
+| Video source | V4L2/GStreamer | FFmpeg |
+| Dependencies | GStreamer, PyGObject | FFmpeg, biim, aiohttp |
+
+---
+
+## Option 1: GStreamer-based Streamer (`streamer.py`)
+
+This builds a GStreamer pipeline which captures frames from a webcam (or a 
+synthetic test pattern), encodes them with latency-focused settings, produces 
+fragmented MP4 CMAF chunks via `splitmuxsink`+`mp4mux`, writes a custom LL-HLS 
+playlist (with `#EXT-X-PART` and blocking reload support), and serves everything 
+through a lightweight HTTP server.
+
+### Setup (one time)
 
 Run the provided helper to install the necessary system packages, bootstrap a
 Python virtual environment, and install Python dependencies:
@@ -98,3 +116,85 @@ The script wires up the following pipeline:
 v4l2src → videoconvert → videoscale → videorate → x264enc (zerolatency)
        → h264parse → splitmuxsink+mp4mux (writes CMAF fragments) → HTTP file server
 ```
+
+---
+
+## Option 2: True LL-HLS Streamer (`streamer_biim.py`)
+
+This uses FFmpeg for video capture/encoding and the [biim](https://github.com/monyone/biim) 
+library for true Apple LL-HLS packaging with partial segments.
+
+### Setup
+
+```bash
+cd ll-hls
+source .venv/bin/activate  # Or create a new venv
+pip install biim aiohttp
+```
+
+Ensure FFmpeg is installed:
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
+```
+
+### Usage
+
+```bash
+# With test source
+python3 streamer_biim.py --test-src --http-port 8080
+
+# With webcam (Linux)
+python3 streamer_biim.py --device /dev/video0 --http-port 8080
+```
+
+### CLI Options
+
+| Flag | Description |
+| --- | --- |
+| `--device /dev/video0` | V4L2 device to capture from |
+| `--test-src` | Use FFmpeg test pattern instead of webcam |
+| `--resolution 1280x720` | Output frame size |
+| `--framerate 30` | Frames per second |
+| `--bitrate 2500` | Encoder bitrate in kbit/s |
+| `--target-duration 1` | Segment duration in seconds |
+| `--part-duration 0.1` | LL-HLS part duration (default: 100ms) |
+| `--window-size 10` | Segments in live window |
+| `--http-port 8080` | HTTP server port |
+
+### Endpoints
+
+- `http://localhost:8080/playlist.m3u8` - LL-HLS playlist
+- `http://localhost:8080/live.m3u8` - Alias for compatibility
+- `http://localhost:8080/timestamps.json` - Timestamp data for latency measurement
+
+### How It Works
+
+```
+FFmpeg (capture + encode) → MPEG-TS pipe → biim (demux + LL-HLS package) → aiohttp (serve)
+```
+
+biim processes the MPEG-TS stream in real-time, creating:
+- Partial segments (parts) every ~100ms
+- Full segments every ~1s
+- Dynamic playlist with `EXT-X-PART`, `EXT-X-PRELOAD-HINT`
+- Blocking playlist reload support
+
+All content is served from memory with no disk I/O.
+
+---
+
+## Client-Side Testing
+
+Both streamers are compatible with the same client tooling:
+
+```bash
+# Run the TypeScript client
+cd ll-hls/client
+npx tsx client.ts http://localhost:8080/live.m3u8
+```
+
+Or open `client/browser.html` directly in a browser with the `?src=` parameter.
