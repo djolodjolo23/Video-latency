@@ -68,6 +68,44 @@ _CURRENT_SEGMENT_INDEX = 0
 _CURRENT_PART_INDEX = 0
 
 
+def _record_new_segments_from_m3u8(m3u8_obj: Any) -> None:
+    """Update the timestamp map using the absolute media sequence, not window size."""
+    global _CURRENT_SEGMENT_INDEX, _SEGMENT_TIMESTAMPS
+    if not hasattr(m3u8_obj, "segments"):
+        return
+
+    try:
+        # biim's m3u8 object exposes either `sequence` or `media_sequence`
+        media_sequence = int(getattr(m3u8_obj, "sequence", getattr(m3u8_obj, "media_sequence", 0)))
+    except Exception:
+        media_sequence = 0
+
+    segments = getattr(m3u8_obj, "segments", [])
+    if not segments:
+        return
+
+    # media_sequence is 0-indexed (used as msn); filename is msn+1
+    latest_file_index = media_sequence + len(segments)
+    if latest_file_index <= _CURRENT_SEGMENT_INDEX:
+        return
+
+    now = time.time_ns()
+    for file_index in range(_CURRENT_SEGMENT_INDEX + 1, latest_file_index + 1):
+        segment_name = f"segment{file_index:05d}.m4s"
+        _SEGMENT_TIMESTAMPS[segment_name] = now
+        LOG.debug(
+            f"Recorded timestamp for {segment_name} "
+            f"(media_sequence={media_sequence}, window={len(segments)})"
+        )
+
+        # Keep a rolling window of recent segments (enough for benchmarking)
+        if len(_SEGMENT_TIMESTAMPS) > 120:
+            oldest = sorted(_SEGMENT_TIMESTAMPS.keys())[0]
+            del _SEGMENT_TIMESTAMPS[oldest]
+
+    _CURRENT_SEGMENT_INDEX = latest_file_index
+
+
 class TimestampTrackingHandler:
     """Wrapper around Fmp4VariantHandler that tracks timestamps for latency measurement."""
     
@@ -85,49 +123,32 @@ class TimestampTrackingHandler:
         
         # Get the current part/segment count before processing
         old_part_count = len(self._handler.m3u8.ongoing_parts) if hasattr(self._handler, 'm3u8') else 0
-        old_segment_count = len(self._handler.m3u8.segments) if hasattr(self._handler, 'm3u8') else 0
         
         # Process the frame
         result = self._handler.h264(pes)
         
-        # Check if a new part was created
+        # Check if a new part was created and update segment timestamps using media sequence
         if hasattr(self._handler, 'm3u8'):
             new_part_count = len(self._handler.m3u8.ongoing_parts)
-            new_segment_count = len(self._handler.m3u8.segments)
             
-            if new_part_count > old_part_count or new_part_count < old_part_count:
+            if new_part_count != old_part_count:
                 _CURRENT_PART_INDEX += 1
                 part_name = f"part{_CURRENT_PART_INDEX:05d}"
                 _PART_TIMESTAMPS[part_name] = time.time_ns()
                 LOG.debug(f"New part: {part_name}")
-            
-            if new_segment_count > old_segment_count:
-                _CURRENT_SEGMENT_INDEX += 1
-                segment_name = f"segment{_CURRENT_SEGMENT_INDEX:05d}.m4s"
-                _SEGMENT_TIMESTAMPS[segment_name] = time.time_ns()
-                LOG.debug(f"New segment: {segment_name}")
-                
-                # Cleanup old timestamps (keep last 30)
-                if len(_SEGMENT_TIMESTAMPS) > 30:
-                    oldest = sorted(_SEGMENT_TIMESTAMPS.keys())[0]
-                    del _SEGMENT_TIMESTAMPS[oldest]
-        
+
+            _record_new_segments_from_m3u8(self._handler.m3u8)
+
         return result
     
     def h265(self, pes):
         """Track H.265 frame and record timestamp."""
         global _SEGMENT_TIMESTAMPS, _CURRENT_SEGMENT_INDEX
         
-        old_segment_count = len(self._handler.m3u8.segments) if hasattr(self._handler, 'm3u8') else 0
         result = self._handler.h265(pes)
         
         if hasattr(self._handler, 'm3u8'):
-            new_segment_count = len(self._handler.m3u8.segments)
-            if new_segment_count > old_segment_count:
-                _CURRENT_SEGMENT_INDEX += 1
-                segment_name = f"segment{_CURRENT_SEGMENT_INDEX:05d}.m4s"
-                _SEGMENT_TIMESTAMPS[segment_name] = time.time_ns()
-                LOG.debug(f"New segment: {segment_name}")
+            _record_new_segments_from_m3u8(self._handler.m3u8)
         
         return result
 
@@ -357,18 +378,8 @@ async def run_biim_pipeline(args: argparse.Namespace) -> None:
                     
                     # Track segment creation for timestamps
                     global _CURRENT_SEGMENT_INDEX, _SEGMENT_TIMESTAMPS
-                    if hasattr(handler, 'm3u8') and hasattr(handler.m3u8, 'segments'):
-                        seg_count = len(handler.m3u8.segments)
-                        if seg_count > _CURRENT_SEGMENT_INDEX:
-                            _CURRENT_SEGMENT_INDEX = seg_count
-                            segment_name = f"segment{_CURRENT_SEGMENT_INDEX:05d}.m4s"
-                            _SEGMENT_TIMESTAMPS[segment_name] = time.time_ns()
-                            LOG.info(f"Recorded timestamp for {segment_name}, published={handler.m3u8.published}")
-                            
-                            # Cleanup old
-                            if len(_SEGMENT_TIMESTAMPS) > 30:
-                                oldest = sorted(_SEGMENT_TIMESTAMPS.keys())[0]
-                                del _SEGMENT_TIMESTAMPS[oldest]
+                    if hasattr(handler, 'm3u8'):
+                        _record_new_segments_from_m3u8(handler.m3u8)
             
             elif PID == H265_PID:
                 H265_PES_Parser.push(packet)
