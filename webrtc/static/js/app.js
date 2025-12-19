@@ -2,12 +2,264 @@ import { createLogger } from "./logging.js";
 
 const remoteVideo = document.getElementById("remoteVideo");
 const logEl = document.getElementById("logs");
+const qoeEl = document.getElementById("qoeStats");
+
+const params = new URLSearchParams(location.search);
+const CLIENT_ID = params.get("clientId") || "0";
 
 const log = createLogger(logEl);
 const socket = io();
 
+remoteVideo.muted = true;
+
 let pc;
+let qoeTimer;
+let qoeChannel;
+let timeSyncTimer;
+const frameQueue = [];
+const FRAME_MATCH_TOLERANCE_SEC = 0.05;
+let lastRenderedFrame = null;
 // let offerSent = false;
+
+const qoeState = {
+  startTime: performance.now(),
+  clientId: CLIENT_ID,
+  ttffMs: null,
+  firstFrameTime: null,
+  hasStarted: false,
+  isPlaying: false,
+  isStalling: false,
+  stallCount: 0,
+  totalStallDurationMs: 0,
+  currentStallStart: null,
+  currentLatencyMs: null,
+  latencySource: "none",
+  latencySamples: [],
+  rttMs: null,
+  clockOffsetMs: null,
+};
+
+function emitQoE(type, data = {}) {
+  const payload = {
+    type,
+    clientId: CLIENT_ID,
+    timestamp: Date.now(),
+    elapsedMs: performance.now() - qoeState.startTime,
+    ...data,
+  };
+  console.log(`QOE ${JSON.stringify(payload)}`);
+}
+
+function resetQoEState() {
+  qoeState.startTime = performance.now();
+  qoeState.ttffMs = null;
+  qoeState.firstFrameTime = null;
+  qoeState.hasStarted = false;
+  qoeState.isPlaying = false;
+  qoeState.isStalling = false;
+  qoeState.stallCount = 0;
+  qoeState.totalStallDurationMs = 0;
+  qoeState.currentStallStart = null;
+  qoeState.currentLatencyMs = null;
+  qoeState.latencySource = "none";
+  qoeState.latencySamples = [];
+  qoeState.rttMs = null;
+  qoeState.clockOffsetMs = null;
+  frameQueue.length = 0;
+  lastRenderedFrame = null;
+  updateQoEPanel();
+}
+
+function formatMs(value, fallback = "-") {
+  if (value === null || value === undefined || Number.isNaN(value)) return fallback;
+  return `${value.toFixed(0)} ms`;
+}
+
+function updateQoEPanel() {
+  if (!qoeEl) return;
+  const avgLatency =
+    qoeState.latencySamples.length > 0
+      ? qoeState.latencySamples.reduce((a, b) => a + b, 0) / qoeState.latencySamples.length
+      : null;
+  qoeEl.textContent = `TTFF: ${formatMs(qoeState.ttffMs, "waiting...")}
+Latency (${qoeState.latencySource}): ${formatMs(qoeState.currentLatencyMs)}
+Avg latency: ${formatMs(avgLatency)}
+RTT: ${formatMs(qoeState.rttMs)}
+Clock offset: ${formatMs(qoeState.clockOffsetMs)}
+Stalls: ${qoeState.stallCount} (${qoeState.totalStallDurationMs.toFixed(0)} ms total)
+Status: ${qoeState.isStalling ? "⏸ STALLING" : qoeState.isPlaying ? "▶ Playing" : "⏹ Stopped"}`;
+}
+
+function markFirstFrame() {
+  if (qoeState.hasStarted) return;
+  qoeState.ttffMs = performance.now() - qoeState.startTime;
+  qoeState.firstFrameTime = performance.now();
+  qoeState.hasStarted = true;
+  emitQoE("ttff", { ttffMs: qoeState.ttffMs });
+}
+
+function handleStallStart() {
+  if (!qoeState.hasStarted || qoeState.isStalling) return;
+  qoeState.isStalling = true;
+  qoeState.currentStallStart = performance.now();
+  qoeState.stallCount += 1;
+  emitQoE("stall_start", { stallCount: qoeState.stallCount });
+}
+
+function handleStallEnd() {
+  if (!qoeState.isStalling || qoeState.currentStallStart === null) return;
+  const stallDuration = performance.now() - qoeState.currentStallStart;
+  qoeState.totalStallDurationMs += stallDuration;
+  qoeState.isStalling = false;
+  qoeState.currentStallStart = null;
+  emitQoE("stall_end", { stallDurationMs: stallDuration });
+}
+
+function recordLatencySample(latencyMs, source) {
+  if (source === "jitter" && qoeState.latencySource === "e2e") {
+    return;
+  }
+  if (source === "e2e") {
+    qoeState.latencySource = "e2e";
+  } else if (qoeState.latencySource === "none") {
+    qoeState.latencySource = "jitter";
+  }
+  qoeState.currentLatencyMs = latencyMs;
+  qoeState.latencySamples.push(latencyMs);
+  if (qoeState.latencySamples.length > 60) {
+    qoeState.latencySamples.shift();
+  }
+  emitQoE("latency", { latencyMs, source, rttMs: qoeState.rttMs });
+}
+
+function updateClockOffset(offsetMs) {
+  if (qoeState.clockOffsetMs === null) {
+    qoeState.clockOffsetMs = offsetMs;
+    return;
+  }
+  const alpha = 0.2;
+  qoeState.clockOffsetMs = qoeState.clockOffsetMs * (1 - alpha) + offsetMs * alpha;
+}
+
+function handleFrameTimestamp(payload) {
+  const pts = payload?.pts;
+  const sendTimeMs = payload?.sendTimeMs;
+  if (typeof pts !== "number" || typeof sendTimeMs !== "number") {
+    return;
+  }
+  if (lastRenderedFrame && Math.abs(lastRenderedFrame.mediaTime - pts) <= FRAME_MATCH_TOLERANCE_SEC) {
+    const offsetMs = qoeState.clockOffsetMs || 0;
+    const latencyMs = lastRenderedFrame.renderTimeMs - (sendTimeMs - offsetMs);
+    recordLatencySample(latencyMs, "e2e");
+    return;
+  }
+  frameQueue.push({ pts, sendTimeMs });
+  if (frameQueue.length > 600) {
+    frameQueue.shift();
+  }
+}
+
+function handleTimeSyncReply(payload) {
+  const t1 = payload?.clientSendMs;
+  const t2 = payload?.serverRecvMs;
+  const t3 = payload?.serverSendMs;
+  const t4 = Date.now();
+  if ([t1, t2, t3].some((v) => typeof v !== "number")) {
+    return;
+  }
+  const offsetMs = ((t2 - t1) + (t3 - t4)) / 2;
+  updateClockOffset(offsetMs);
+}
+
+function sendTimeSync() {
+  if (!qoeChannel || qoeChannel.readyState !== "open") return;
+  const payload = { type: "time_sync", clientSendMs: Date.now() };
+  qoeChannel.send(JSON.stringify(payload));
+}
+
+function onVideoFrame(_now, metadata) {
+  const renderTimeMs = Date.now();
+  const mediaTime = metadata.mediaTime;
+  lastRenderedFrame = { mediaTime, renderTimeMs };
+  if (!qoeState.hasStarted) {
+    markFirstFrame();
+  }
+
+  while (frameQueue.length && frameQueue[0].pts < mediaTime - FRAME_MATCH_TOLERANCE_SEC) {
+    frameQueue.shift();
+  }
+  if (frameQueue.length && Math.abs(frameQueue[0].pts - mediaTime) <= FRAME_MATCH_TOLERANCE_SEC) {
+    const match = frameQueue.shift();
+    const offsetMs = qoeState.clockOffsetMs || 0;
+    const latencyMs = renderTimeMs - (match.sendTimeMs - offsetMs);
+    recordLatencySample(latencyMs, "e2e");
+  }
+
+  if (typeof remoteVideo.requestVideoFrameCallback === "function") {
+    remoteVideo.requestVideoFrameCallback(onVideoFrame);
+  }
+}
+
+async function collectStats() {
+  if (!pc) {
+    updateQoEPanel();
+    return;
+  }
+  try {
+    const stats = await pc.getStats();
+    let jitterBufferDelayMs = null;
+    let selectedPairId = null;
+
+    stats.forEach((report) => {
+      if (report.type === "inbound-rtp" && report.kind === "video" && !report.isRemote) {
+        if (
+          typeof report.jitterBufferDelay === "number" &&
+          typeof report.jitterBufferEmittedCount === "number" &&
+          report.jitterBufferEmittedCount > 0
+        ) {
+          jitterBufferDelayMs =
+            (report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000;
+        }
+      }
+      if (report.type === "transport" && report.selectedCandidatePairId) {
+        selectedPairId = report.selectedCandidatePairId;
+      }
+    });
+
+    if (selectedPairId && stats.get(selectedPairId)) {
+      const pair = stats.get(selectedPairId);
+      if (pair && pair.currentRoundTripTime !== undefined && pair.currentRoundTripTime !== null) {
+        qoeState.rttMs = pair.currentRoundTripTime * 1000;
+      }
+    }
+
+    if (jitterBufferDelayMs !== null) {
+      recordLatencySample(jitterBufferDelayMs, "jitter");
+    }
+
+    const avgLatency =
+      qoeState.latencySamples.length > 0
+        ? qoeState.latencySamples.reduce((a, b) => a + b, 0) / qoeState.latencySamples.length
+        : null;
+
+    emitQoE("stats", {
+      ttffMs: qoeState.ttffMs,
+      currentLatencyMs: qoeState.currentLatencyMs,
+      avgLatencyMs: avgLatency,
+      stallCount: qoeState.stallCount,
+      totalStallDurationMs: qoeState.totalStallDurationMs,
+      isStalling: qoeState.isStalling,
+      isPlaying: qoeState.isPlaying,
+      rttMs: qoeState.rttMs,
+      latencySource: qoeState.latencySource,
+      clockOffsetMs: qoeState.clockOffsetMs,
+    });
+    updateQoEPanel();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`Stats collection error: ${message}`);
+  }
+}
 
 socket.on("connect", () => {
   log("Socket.IO connected");
@@ -36,6 +288,36 @@ function createPeerConnection() {
   const nextPc = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
+  qoeChannel = nextPc.createDataChannel("qoe");
+  qoeChannel.onopen = () => {
+    log("QoE data channel opened");
+    sendTimeSync();
+    if (timeSyncTimer) {
+      clearInterval(timeSyncTimer);
+    }
+    timeSyncTimer = setInterval(sendTimeSync, 5000);
+  };
+  qoeChannel.onclose = () => {
+    log("QoE data channel closed");
+    if (timeSyncTimer) {
+      clearInterval(timeSyncTimer);
+      timeSyncTimer = null;
+    }
+  };
+  qoeChannel.onmessage = (event) => {
+    if (typeof event.data !== "string") return;
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (payload.type === "frame_ts") {
+      handleFrameTimestamp(payload);
+    } else if (payload.type === "time_sync_reply") {
+      handleTimeSyncReply(payload);
+    }
+  };
   // offerSent = false; // reset state for new connection not implemented yet
   nextPc.onicecandidate = (event) => {
     if (event.candidate) {
@@ -52,6 +334,9 @@ function createPeerConnection() {
     remoteVideo
       .play()
       .catch(() => log("Autoplay was blocked; click the video to start playback."));
+    if (typeof remoteVideo.requestVideoFrameCallback === "function") {
+      remoteVideo.requestVideoFrameCallback(onVideoFrame);
+    }
   };
 
   nextPc.addTransceiver("video", { direction: "recvonly" });
@@ -61,6 +346,7 @@ function createPeerConnection() {
 
 async function start() {
   if (pc) return;
+  resetQoEState();
   log("Creating receive-only peer connection...");
   pc = createPeerConnection();
   try {
@@ -116,5 +402,33 @@ remoteVideo.addEventListener("click", () => {
   }
   start().catch((err) => log(`Error starting stream: ${err.message}`));
 });
+
+remoteVideo.addEventListener("playing", () => {
+  qoeState.isPlaying = true;
+  if (!qoeState.hasStarted) {
+    markFirstFrame();
+  }
+  handleStallEnd();
+});
+
+remoteVideo.addEventListener("waiting", () => {
+  handleStallStart();
+});
+
+remoteVideo.addEventListener("stalled", () => {
+  handleStallStart();
+});
+
+remoteVideo.addEventListener("pause", () => {
+  qoeState.isPlaying = false;
+});
+
+remoteVideo.addEventListener("error", () => {
+  emitQoE("error", { error: remoteVideo.error?.message || "unknown" });
+});
+
+if (!qoeTimer) {
+  qoeTimer = setInterval(collectStats, 1000);
+}
 
 start().catch((err) => log(`Error starting stream: ${err.message}`));
