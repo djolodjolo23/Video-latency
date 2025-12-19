@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HLS QoE Probe</title>
+  <style>
+    body { margin: 0; background: #000; color: #fff; font-family: system-ui, -apple-system, sans-serif; display: grid; place-items: center; height: 100vh; }
+    video { width: 90vw; max-width: 1200px; max-height: 80vh; background: #111; }
+    #stats { position: fixed; top: 12px; left: 12px; padding: 8px 10px; background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 6px; font-family: monospace; white-space: pre-line; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="stats">Initializing...</div>
+  <video id="video" autoplay muted playsinline></video>
+
+  <script type="module">
+    import Hls from 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.mjs';
+
+    // Get client ID from URL params (for multi-client identification)
+    const params = new URLSearchParams(location.search);
+    const STREAM_URL = params.get('src') || 'http://localhost:8080/live.m3u8';
+    const CLIENT_ID = params.get('clientId') || '0';
+    
+    const video = document.getElementById('video');
+    const statsEl = document.getElementById('stats');
+
+    // ========== QoE Metrics State ==========
+    const qoeState = {
+      clientId: CLIENT_ID,
+      startTime: performance.now(),
+      
+      // Time to First Frame
+      ttffMs: null,
+      firstFrameTime: null,
+      
+      // Latency tracking
+      currentLatencyMs: null,
+      latencySamples: [],
+      
+      // Stall/Rebuffering tracking
+      stallCount: 0,
+      totalStallDurationMs: 0,
+      currentStallStart: null,
+      isStalling: false,
+      
+      // Playback state
+      isPlaying: false,
+      hasStarted: false,
+      
+      // Buffer info
+      bufferAheadSec: 0,
+      bufferTotalSec: 0,
+    };
+
+    let segmentTimestamps = {};
+
+    // ========== Timestamp Fetching ==========
+    async function fetchTimestamps() {
+      try {
+        const baseUrl = new URL(STREAM_URL).origin;
+        const url = `${baseUrl}/timestamps.json`;
+        const resp = await fetch(url, { mode: 'cors' });
+        if (!resp.ok) {
+          console.log('QOE ' + JSON.stringify({ type: 'debug', message: `Timestamp fetch failed: ${resp.status}` }));
+          return;
+        }
+        const data = await resp.json();
+        if (data.segments) {
+          segmentTimestamps = data.segments;
+          const count = Object.keys(segmentTimestamps).length;
+          if (count > 0 && !window._timestampsLogged) {
+            console.log('QOE ' + JSON.stringify({ type: 'debug', message: `Loaded ${count} segment timestamps` }));
+            window._timestampsLogged = true;
+          }
+        } else {
+          segmentTimestamps = data;
+        }
+      } catch (e) {
+        console.log('QOE ' + JSON.stringify({ type: 'debug', message: `Timestamp fetch error: ${e.message}` }));
+      }
+    }
+
+    fetchTimestamps();
+    setInterval(fetchTimestamps, 500);
+
+    // ========== Buffer Info Helper ==========
+    function getBufferInfo() {
+      if (!video.buffered.length) return { start: 0, end: 0, length: 0, ahead: 0 };
+      const currentTime = video.currentTime;
+      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+      const bufferedStart = video.buffered.start(0);
+      return {
+        start: bufferedStart,
+        end: bufferedEnd,
+        length: bufferedEnd - bufferedStart,
+        ahead: bufferedEnd - currentTime,
+      };
+    }
+
+    // ========== Emit QoE Event for Puppeteer ==========
+    function emitQoE(eventType, data = {}) {
+      const event = {
+        type: eventType,
+        clientId: CLIENT_ID,
+        timestamp: Date.now(),
+        elapsedMs: performance.now() - qoeState.startTime,
+        ...data
+      };
+      console.log('QOE ' + JSON.stringify(event));
+    }
+
+    // ========== Periodic Stats Emission ==========
+    function emitPeriodicStats() {
+      const buf = getBufferInfo();
+      qoeState.bufferAheadSec = buf.ahead;
+      qoeState.bufferTotalSec = buf.length;
+      
+      const avgLatency = qoeState.latencySamples.length > 0
+        ? qoeState.latencySamples.reduce((a, b) => a + b, 0) / qoeState.latencySamples.length
+        : null;
+      
+      emitQoE('stats', {
+        ttffMs: qoeState.ttffMs,
+        currentLatencyMs: qoeState.currentLatencyMs,
+        avgLatencyMs: avgLatency,
+        stallCount: qoeState.stallCount,
+        totalStallDurationMs: qoeState.totalStallDurationMs,
+        isStalling: qoeState.isStalling,
+        isPlaying: qoeState.isPlaying,
+        bufferAheadSec: buf.ahead,
+        bufferTotalSec: buf.length,
+        latencySampleCount: qoeState.latencySamples.length,
+      });
+
+      // Update display
+      statsEl.textContent = `Client #${CLIENT_ID}
+TTFF: ${qoeState.ttffMs ? qoeState.ttffMs.toFixed(0) + ' ms' : 'waiting...'}
+Latency: ${qoeState.currentLatencyMs ? qoeState.currentLatencyMs.toFixed(0) + ' ms' : '-'}
+Avg Latency: ${avgLatency ? avgLatency.toFixed(0) + ' ms' : '-'}
+Stalls: ${qoeState.stallCount} (${qoeState.totalStallDurationMs.toFixed(0)} ms total)
+Buffer: ${buf.ahead.toFixed(2)}s ahead
+Status: ${qoeState.isStalling ? '⏸ STALLING' : qoeState.isPlaying ? '▶ Playing' : '⏹ Stopped'}`;
+    }
+
+    // Emit stats every second
+    setInterval(emitPeriodicStats, 1000);
+
+    // ========== HLS.js Setup ==========
+    if (Hls.isSupported()) {
+      const hls = new Hls({ 
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 30,
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
+        maxLiveSyncPlaybackRate: 1.5,
+        progressive: true,
+        maxBufferLength: 2,
+        maxMaxBufferLength: 4,
+        maxBufferSize: 2 * 1000 * 1000,
+        maxBufferHole: 0.1,
+        abrEwmaDefaultEstimate: 5000000,
+      });
+
+      // ========== Video Element Events ==========
+      
+      // First frame / canplay
+      video.addEventListener('canplay', () => {
+        if (!qoeState.hasStarted) {
+          qoeState.ttffMs = performance.now() - qoeState.startTime;
+          qoeState.firstFrameTime = performance.now();
+          qoeState.hasStarted = true;
+          emitQoE('ttff', { ttffMs: qoeState.ttffMs });
+        }
+      });
+
+      // Playing state
+      video.addEventListener('playing', () => {
+        qoeState.isPlaying = true;
+        
+        // End stall if we were stalling
+        if (qoeState.isStalling && qoeState.currentStallStart !== null) {
+          const stallDuration = performance.now() - qoeState.currentStallStart;
+          qoeState.totalStallDurationMs += stallDuration;
+          qoeState.isStalling = false;
+          qoeState.currentStallStart = null;
+          emitQoE('stall_end', { stallDurationMs: stallDuration });
+        }
+      });
+
+      // Waiting / buffering (stall start)
+      video.addEventListener('waiting', () => {
+        if (qoeState.hasStarted && !qoeState.isStalling) {
+          qoeState.isStalling = true;
+          qoeState.currentStallStart = performance.now();
+          qoeState.stallCount++;
+          emitQoE('stall_start', { stallCount: qoeState.stallCount });
+        }
+      });
+
+      // Pause
+      video.addEventListener('pause', () => {
+        qoeState.isPlaying = false;
+      });
+
+      // Error
+      video.addEventListener('error', (e) => {
+        emitQoE('error', { error: video.error?.message || 'unknown' });
+      });
+
+      // ========== HLS.js Events ==========
+      
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          emitQoE('hls_error', { 
+            type: data.type, 
+            details: data.details,
+            fatal: true 
+          });
+        }
+      });
+
+      hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
+        const frag = data.frag;
+        const relurl = frag.relurl;
+        
+        // Debug: log segment URL and available timestamps
+        const timestampCount = Object.keys(segmentTimestamps).length;
+        if (timestampCount === 0) {
+          console.log('QOE ' + JSON.stringify({ type: 'debug', message: `No timestamps loaded yet, segment: ${relurl}` }));
+        }
+        
+        let segmentFilename = null;
+        
+        // Format 1: biim style "segment?msn=123"
+        const biimMatch = relurl.match(/segment\?msn=(\d+)/);
+        if (biimMatch) {
+          // biim uses 0-indexed msn, but timestamps use 1-indexed segment00001.m4s
+          const msn = parseInt(biimMatch[1], 10);
+          segmentFilename = `segment${String(msn + 1).padStart(5, '0')}.m4s`;
+        }
+        
+        // Format 2: GStreamer style "segment00001.m4s" or "segment00001.ts"
+        if (!segmentFilename) {
+          const gstMatch = relurl.match(/([a-zA-Z_-]+)(\d{5})\.(ts|m4s)/);
+          if (gstMatch) {
+            segmentFilename = `${gstMatch[1]}${gstMatch[2]}.${gstMatch[3]}`;
+          }
+        }
+        
+        if (!segmentFilename) {
+          console.log('QOE ' + JSON.stringify({ type: 'debug', message: `Segment URL did not match any format: ${relurl}` }));
+          return;
+        }
+        
+        const productionNs = segmentTimestamps[segmentFilename];
+        if (!productionNs) {
+          // Log once per segment mismatch
+          if (!window._loggedMissingSegs) window._loggedMissingSegs = new Set();
+          if (!window._loggedMissingSegs.has(segmentFilename)) {
+            window._loggedMissingSegs.add(segmentFilename);
+            const available = Object.keys(segmentTimestamps).slice(0, 5).join(', ');
+            console.log('QOE ' + JSON.stringify({ type: 'debug', message: `No timestamp for ${segmentFilename}, available: [${available}...]` }));
+          }
+          return;
+        }
+
+        const productionMs = Number(productionNs) / 1_000_000;
+        const clientMs = performance.now() + performance.timeOrigin;
+        const latencyMs = clientMs - productionMs;
+
+        // Update state
+        qoeState.currentLatencyMs = latencyMs;
+        qoeState.latencySamples.push(latencyMs);
+        
+        // Keep only last 60 samples (1 minute at 1/sec)
+        if (qoeState.latencySamples.length > 60) {
+          qoeState.latencySamples.shift();
+        }
+
+        emitQoE('latency', {
+          latencyMs: latencyMs,
+          segmentFilename: segmentFilename,
+          bufferAheadSec: getBufferInfo().ahead,
+        });
+      });
+
+      // Start loading
+      hls.loadSource(STREAM_URL);
+      hls.attachMedia(video);
+      
+      emitQoE('init', { streamUrl: STREAM_URL });
+      
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS (Safari)
+      video.src = STREAM_URL;
+      
+      video.addEventListener('canplay', () => {
+        if (!qoeState.hasStarted) {
+          qoeState.ttffMs = performance.now() - qoeState.startTime;
+          qoeState.hasStarted = true;
+          emitQoE('ttff', { ttffMs: qoeState.ttffMs });
+        }
+      });
+      
+      emitQoE('init', { streamUrl: STREAM_URL, native: true });
+    } else {
+      emitQoE('error', { error: 'HLS not supported' });
+      statsEl.textContent = 'HLS not supported in this browser';
+    }
+  </script>
+</body>
+</html>
