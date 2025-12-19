@@ -1,3 +1,4 @@
 aiohttp
 aiortc
 python-socketio[client]
+psutil>=5.9.0

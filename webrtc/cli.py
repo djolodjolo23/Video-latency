@@ -46,6 +46,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--audio-codec", help="Force a specific audio codec (e.g. audio/opus)")
     parser.add_argument("--video-codec", help="Force a specific video codec (e.g. video/H264)")
+    parser.add_argument(
+        "--expected-clients",
+        type=int,
+        default=0,
+        help="Start server metrics only after N clients connect (0 to disable)",
+    )
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=30.0,
+        help="Abort if N clients not reached within this time (seconds)",
+    )
+    parser.add_argument(
+        "--metrics-interval",
+        type=float,
+        default=1.0,
+        help="Server metrics sampling interval in seconds",
+    )
+    parser.add_argument(
+        "--metrics-output",
+        default="server_metrics.csv",
+        help="Path for server metrics CSV output",
+    )
     return parser
 
 

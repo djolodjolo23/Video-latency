@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 from aiohttp import web
+import psutil
 
 # Add local biim to path
 BIIM_PATH = Path(__file__).parent / "biim"
@@ -28,6 +30,128 @@ LOG = logging.getLogger("ll-hls")
 _SEGMENT_TIMESTAMPS: Dict[str, int] = {}
 _PART_TIMESTAMPS: Dict[str, int] = {}
 _CURRENT_SEGMENT_INDEX = 0
+_CLIENT_LAST_SEEN: Dict[str, float] = {}
+
+
+class ServerMetricsMonitor:
+    def __init__(
+        self,
+        expected_clients: int,
+        connect_timeout: float,
+        client_timeout: float,
+        interval: float,
+        output_path: Path,
+        proc_pid: Optional[int] = None,
+    ) -> None:
+        self.expected_clients = expected_clients
+        self.connect_timeout = connect_timeout
+        self.client_timeout = client_timeout
+        self.interval = interval
+        self.output_path = output_path
+        self.proc = psutil.Process(proc_pid or os.getpid())
+        self._started = False
+        self._start_ts = None
+        self._samples: list[dict[str, float]] = []
+        self._prev_net = psutil.net_io_counters()
+        psutil.cpu_percent(interval=None)
+        self.proc.cpu_percent(interval=None)
+
+    def mark_client(self, client_id: str) -> None:
+        _CLIENT_LAST_SEEN[client_id] = time.monotonic()
+
+    def active_clients(self) -> int:
+        now = time.monotonic()
+        stale = [cid for cid, ts in _CLIENT_LAST_SEEN.items() if now - ts > self.client_timeout]
+        for cid in stale:
+            _CLIENT_LAST_SEEN.pop(cid, None)
+        return len(_CLIENT_LAST_SEEN)
+
+    async def run(self) -> None:
+        if self.expected_clients <= 0:
+            return
+
+        start_wait = time.monotonic()
+        while True:
+            await asyncio.sleep(0.2)
+            count = self.active_clients()
+            if count >= self.expected_clients:
+                self._started = True
+                self._start_ts = time.time()
+                LOG.info("All %s clients connected. Starting server metrics.", self.expected_clients)
+                break
+            if time.monotonic() - start_wait > self.connect_timeout:
+                LOG.error("Expected %s clients not reached within %.1fs; aborting.", self.expected_clients, self.connect_timeout)
+                os._exit(1)
+
+        while True:
+            await asyncio.sleep(self.interval)
+            count = self.active_clients()
+            self._record_sample(count)
+            if count == 0:
+                LOG.info("All clients disconnected. Stopping server metrics.")
+                break
+
+        self._write_summary()
+
+    def _record_sample(self, connected: int) -> None:
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        proc_cpu = self.proc.cpu_percent(interval=None) / psutil.cpu_count()
+        proc_rss_mb = self.proc.memory_info().rss / (1024**2)
+        net = psutil.net_io_counters()
+        rx_delta = net.bytes_recv - self._prev_net.bytes_recv
+        tx_delta = net.bytes_sent - self._prev_net.bytes_sent
+        self._prev_net = net
+        rx_kbps = (rx_delta * 8) / (self.interval * 1000)
+        tx_kbps = (tx_delta * 8) / (self.interval * 1000)
+        self._samples.append(
+            {
+                "connected": float(connected),
+                "sys_cpu": cpu,
+                "sys_mem": mem.percent,
+                "proc_cpu": proc_cpu,
+                "proc_rss_mb": proc_rss_mb,
+                "rx_kbps": rx_kbps,
+                "tx_kbps": tx_kbps,
+            }
+        )
+
+    def _write_summary(self) -> None:
+        if not self._samples or self._start_ts is None:
+            return
+        duration = time.time() - self._start_ts
+        avg = lambda key: sum(s[key] for s in self._samples) / len(self._samples)
+        row = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "session_id": time.strftime("%Y%m%d-%H%M%S", time.localtime(self._start_ts)),
+            "expected_clients": self.expected_clients,
+            "connected_clients": int(max(s["connected"] for s in self._samples)),
+            "duration_sec": duration,
+            "avg_sys_cpu_pct": avg("sys_cpu"),
+            "avg_sys_mem_pct": avg("sys_mem"),
+            "avg_proc_cpu_pct": avg("proc_cpu"),
+            "avg_proc_rss_mb": avg("proc_rss_mb"),
+            "avg_net_rx_kbps": avg("rx_kbps"),
+            "avg_net_tx_kbps": avg("tx_kbps"),
+            "samples": len(self._samples),
+        }
+        header = (
+            "timestamp,session_id,expected_clients,connected_clients,duration_sec,"
+            "avg_sys_cpu_pct,avg_sys_mem_pct,avg_proc_cpu_pct,avg_proc_rss_mb,"
+            "avg_net_rx_kbps,avg_net_tx_kbps,samples\n"
+        )
+        line = (
+            f"{row['timestamp']},{row['session_id']},{row['expected_clients']},{row['connected_clients']},"
+            f"{row['duration_sec']:.1f},{row['avg_sys_cpu_pct']:.2f},{row['avg_sys_mem_pct']:.2f},"
+            f"{row['avg_proc_cpu_pct']:.2f},{row['avg_proc_rss_mb']:.1f},{row['avg_net_rx_kbps']:.2f},"
+            f"{row['avg_net_tx_kbps']:.2f},{row['samples']}\n"
+        )
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.output_path.exists():
+            self.output_path.write_text(header + line)
+        else:
+            with self.output_path.open("a") as f:
+                f.write(line)
 
 
 def _record_new_segments_from_m3u8(m3u8_obj: Any) -> None:
@@ -109,6 +233,14 @@ async def run_pipeline(args) -> None:
         has_video=True, has_audio=True
     )
     
+    monitor = ServerMetricsMonitor(
+        expected_clients=args.expected_clients,
+        connect_timeout=args.connect_timeout,
+        client_timeout=args.client_timeout,
+        interval=args.metrics_interval,
+        output_path=Path(args.metrics_output),
+    )
+
     # HTTP routes
     async def serve_client(req):
         html_path = Path(__file__).parent / "client" / "browser.html"
@@ -116,8 +248,17 @@ async def run_pipeline(args) -> None:
             return web.Response(text=html_path.read_text(), content_type="text/html", 
                               headers={"Access-Control-Allow-Origin": "*"})
         return web.Response(text="Client not found", status=404)
+
+    @web.middleware
+    async def client_tracking_middleware(request, handler):
+        client_id = request.query.get("clientId")
+        if not client_id:
+            client_id = request.remote or "unknown"
+        monitor.mark_client(client_id)
+        return await handler(request)
     
     app = web.Application()
+    app.middlewares.append(client_tracking_middleware)
     app.add_routes([
         web.get('/', serve_client),
         web.get('/playlist.m3u8', handler.playlist),
@@ -127,6 +268,9 @@ async def run_pipeline(args) -> None:
         web.get('/init', handler.initialization),
         web.get('/timestamps.json', handle_timestamps),
     ])
+
+    if args.expected_clients > 0:
+        asyncio.create_task(monitor.run())
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -234,6 +378,11 @@ def main():
     p.add_argument("--part-duration", default=0.1, type=float)
     p.add_argument("--window-size", default=5, type=int)
     p.add_argument("--port", default=8080, type=int)
+    p.add_argument("--expected-clients", type=int, default=0, help="Start metrics only after N clients connect (0 to disable)")
+    p.add_argument("--connect-timeout", type=float, default=30.0, help="Abort if N clients not reached within this time (seconds)")
+    p.add_argument("--client-timeout", type=float, default=10.0, help="Consider client disconnected after inactivity (seconds)")
+    p.add_argument("--metrics-interval", type=float, default=1.0, help="Server metrics sampling interval in seconds")
+    p.add_argument("--metrics-output", default="server_metrics.csv", help="Path for server metrics CSV output")
     args = p.parse_args()
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")

@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer, MediaRelay
@@ -71,7 +71,10 @@ class WebRTCPeerManager:
         transceiver.setCodecPreferences([c for c in codecs if c.mimeType == codec])
 
     async def create_peer_connection(
-        self, offer: RTCSessionDescription, sid: Optional[str] = None
+        self,
+        offer: RTCSessionDescription,
+        sid: Optional[str] = None,
+        state_callback: Optional[Callable[[RTCPeerConnection, str, Optional[str]], None]] = None,
     ) -> RTCPeerConnection:
         pc = RTCPeerConnection()
         timestamped_video: Optional[TimestampedVideoTrack] = None
@@ -84,6 +87,11 @@ class WebRTCPeerManager:
         @pc.on("connectionstatechange")
         async def on_state_change() -> None:
             logging.info("Connection state is %s", pc.connectionState)
+            if state_callback:
+                try:
+                    state_callback(pc, pc.connectionState, sid)
+                except Exception:
+                    logging.exception("Connection state callback failed")
             if pc.connectionState in ("failed", "closed"):
                 await self.close_peer(pc, sid=sid)
 

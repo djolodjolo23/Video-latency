@@ -20,6 +20,7 @@
     const params = new URLSearchParams(location.search);
     const STREAM_URL = params.get('src') || 'http://localhost:8080/live.m3u8';
     const CLIENT_ID = params.get('clientId') || '0';
+    const CLIENT_QUERY = CLIENT_ID ? `clientId=${encodeURIComponent(CLIENT_ID)}` : '';
     
     const video = document.getElementById('video');
     const statsEl = document.getElementById('stats');
@@ -160,6 +161,12 @@ Status: ${qoeState.isStalling ? '⏸ STALLING' : qoeState.isPlaying ? '▶ Playi
         maxBufferSize: 2 * 1000 * 1000,
         maxBufferHole: 0.1,
         abrEwmaDefaultEstimate: 5000000,
+        xhrSetup: (xhr, url) => {
+          if (!CLIENT_QUERY) return;
+          if (url.includes("clientId=")) return;
+          const sep = url.includes("?") ? "&" : "?";
+          xhr.open("GET", `${url}${sep}${CLIENT_QUERY}`, true);
+        },
       });
 
       // ========== Video Element Events ==========
