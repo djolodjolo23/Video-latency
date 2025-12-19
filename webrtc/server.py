@@ -1,5 +1,6 @@
 import logging
 import ssl
+import time
 from pathlib import Path
 
 import socketio
@@ -23,12 +24,14 @@ def create_app(config, source=None) -> web.Application:
     media_source = source if source is not None else open_media_source(config)
     peer_manager = WebRTCPeerManager(config, media_source)
     sio = socketio.AsyncServer(async_mode="aiohttp", cors_allowed_origins="*")
+    metrics_by_sid = {}
 
     app = web.Application()
     app["config"] = config
     app["media_source"] = media_source
     app["peer_manager"] = peer_manager
     app["sio"] = sio
+    app["metrics_by_sid"] = metrics_by_sid
     sio.attach(app)
 
     async def offer(request: web.Request) -> web.Response:
@@ -45,6 +48,7 @@ def create_app(config, source=None) -> web.Application:
     async def disconnect(sid) -> None:
         logging.info("Socket disconnected %s", sid)
         await peer_manager.close_for_sid(sid)
+        metrics_by_sid.pop(sid, None)
 
     @sio.on("offer")  # type: ignore
     async def on_socket_offer(sid, data) -> None:
@@ -66,6 +70,11 @@ def create_app(config, source=None) -> web.Application:
     @sio.on("candidate")  # type: ignore
     async def on_socket_candidate(sid, data) -> None:
         await peer_manager.add_candidate(sid, data)
+
+    @sio.on("metrics")  # type: ignore
+    async def on_socket_metrics(sid, data) -> None:
+        metrics_by_sid[sid] = {"data": data, "received_at": time.time()}
+        logging.info("Metrics from %s: %s", sid, data)
 
     async def on_shutdown(app: web.Application) -> None:
         try:

@@ -54,6 +54,25 @@
         line-height: 1.4;
         font-size: 13px;
       }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px 12px;
+        font-size: 14px;
+      }
+      .metric-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 8px;
+      }
+      .metric-row span:first-child {
+        opacity: 0.75;
+      }
     </style>
   </head>
   <body>
@@ -69,6 +88,11 @@
         <div style="margin-bottom: 6px; font-weight: 600">Server camera</div>
         <video id="remoteVideo" autoplay playsinline></video>
       </div>
+    </div>
+
+    <div class="panel">
+      <div style="margin-bottom: 6px; font-weight: 600">Metrics</div>
+      <div id="metrics" class="metrics"></div>
     </div>
 
     <div class="panel">
