@@ -102,6 +102,27 @@ class WebRTCPeerManager:
             if channel.label == "qoe" and timestamped_video:
                 timestamped_video.set_data_channel(channel)
 
+            @channel.on("message")
+            def on_message(message) -> None:
+                if not isinstance(message, str):
+                    return
+                try:
+                    payload = json.loads(message)
+                except Exception:
+                    return
+                if payload.get("type") == "time_sync":
+                    now_ms = int(time.time() * 1000)
+                    response = {
+                        "type": "time_sync_reply",
+                        "clientSendMs": payload.get("clientSendMs"),
+                        "serverRecvMs": now_ms,
+                        "serverSendMs": int(time.time() * 1000),
+                    }
+                    try:
+                        channel.send(json.dumps(response))
+                    except Exception:
+                        logging.exception("Failed to send time sync reply")
+
         audio, video = self._subscribe_tracks()
         if audio is None and video is None:
             logging.warning("No media source available; answering without media tracks")
