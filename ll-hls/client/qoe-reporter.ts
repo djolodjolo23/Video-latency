@@ -6,8 +6,8 @@ import { Config } from './qoe-config.js';
 interface AggregateStats {
   allTTFF: number[];
   allLatencies: number[];
-  totalStalls: number;
-  totalStallTime: number;
+  avgStallsPerClient: number;
+  avgStallTimePerClient: number;
   totalErrors: number;
 }
 
@@ -55,9 +55,12 @@ function computeAggregates(allMetrics: ClientMetrics[]): AggregateStats {
   const allLatencies = allMetrics.flatMap(m => m.latencySamples).filter(l => !isNaN(l));
   const totalStalls = allMetrics.reduce((sum, m) => sum + m.stallCount, 0);
   const totalStallTime = allMetrics.reduce((sum, m) => sum + m.totalStallDurationMs, 0);
+  const clientCount = allMetrics.length || 1;
+  const avgStallsPerClient = totalStalls / clientCount;
+  const avgStallTimePerClient = totalStallTime / clientCount;
   const totalErrors = allMetrics.reduce((sum, m) => sum + m.errors.length, 0);
 
-  return { allTTFF, allLatencies, totalStalls, totalStallTime, totalErrors };
+  return { allTTFF, allLatencies, avgStallsPerClient, avgStallTimePerClient, totalErrors };
 }
 
 function writeAggregateRow(agg: AggregateStats, config: Config, timestamp: string): void {
@@ -69,10 +72,10 @@ function writeAggregateRow(agg: AggregateStats, config: Config, timestamp: strin
   const minLatency = agg.allLatencies.length > 0 ? Math.min(...agg.allLatencies) : 0;
   const maxLatency = agg.allLatencies.length > 0 ? Math.max(...agg.allLatencies) : 0;
   
-  const aggregateRow = `${timestamp},${config.numClients},${config.durationSec},${avgTTFF.toFixed(1)},${avgLatency.toFixed(1)},${minLatency.toFixed(1)},${maxLatency.toFixed(1)},${agg.totalStalls},${agg.totalStallTime.toFixed(0)},${agg.totalErrors}\n`;
+  const aggregateRow = `${timestamp},${config.numClients},${config.durationSec},${avgTTFF.toFixed(1)},${avgLatency.toFixed(1)},${minLatency.toFixed(1)},${maxLatency.toFixed(1)},${agg.avgStallsPerClient.toFixed(2)},${agg.avgStallTimePerClient.toFixed(0)},${agg.totalErrors}\n`;
   
   if (!aggregateExists) {
-    fs.writeFileSync(aggregatePath, 'timestamp,num_clients,duration_sec,avg_ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,total_stalls,total_stall_ms,total_errors\n' + aggregateRow);
+    fs.writeFileSync(aggregatePath, 'timestamp,num_clients,duration_sec,avg_ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,avg_stalls_per_client,avg_stall_ms_per_client,total_errors\n' + aggregateRow);
   } else {
     fs.appendFileSync(aggregatePath, aggregateRow);
   }

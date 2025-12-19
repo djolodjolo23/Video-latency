@@ -107,11 +107,9 @@ class QoEBenchmark {
     console.log(`All clients started. Running for ${this.config.durationSec} seconds...`);
     console.log();
 
-    // Collect data every second
     for (let second = 0; second < this.config.durationSec; second++) {
       await this.sleep(1000);
       
-      // Record metrics from each client
       for (const client of this.clients) {
         client.recordSecond(second + 1);
       }
