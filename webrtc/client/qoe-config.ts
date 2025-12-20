@@ -41,6 +41,8 @@ export function parseArgs(): Config {
       case "-d":
         config.durationSec = parseInt(args[++i], 10);
         break;
+      case "--stream":
+      case "-s":
       case "--page":
       case "-p":
         config.pageUrl = args[++i];
@@ -77,7 +79,7 @@ Usage: npx tsx webrtc/client/qoe-benchmark.ts [options]
 Options:
   --clients, -c <n>     Number of concurrent clients (default: 1)
   --duration, -d <sec>  Test duration in seconds (default: 60)
-  --page, -p <url>      WebRTC page URL (default: http://localhost:8080/)
+  --stream, -s <url>    WebRTC page URL (default: http://localhost:8080/)
   --output, -o <dir>    Output directory for CSV files (default: ./qoe-results)
   --stagger <ms>        Delay between launching clients (default: 0)
   --browsers <n>        Number of Chromium processes to launch (default: 1)

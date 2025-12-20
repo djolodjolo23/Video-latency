@@ -1,6 +1,6 @@
 /**
  * Multi-Client QoE Benchmark for LL-HLS
- * Usage: npx tsx qoe-benchmark.ts --clients 10 --duration 60 --stream http://localhost:8080/live.m3u8
+ * Usage: npx tsx ll-hls/client/qoe-benchmark.ts --clients 10 --duration 60 --stream http://localhost:8080/live.m3u8
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
