@@ -1,0 +1,5 @@
+inotify-simple>=1.3.5
+
+# For biim-based true LL-HLS streamer (streamer_biim.py)
+aiohttp>=3.8.0
+psutil>=5.9.0
