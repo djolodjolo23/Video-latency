@@ -1,0 +1,11 @@
+.envrc
+.tool-versions
+.python-version
+
+.venv
+
+__pycache__
+*.py[cod]
+*$py.class
+
+dist/

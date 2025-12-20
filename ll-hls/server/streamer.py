@@ -11,8 +11,8 @@ from typing import Optional, Dict, Any
 
 from aiohttp import web
 
-# Add local biim to path
-BIIM_PATH = Path(__file__).parent / "biim"
+# Add local biim to path (repo root / biim contains the package)
+BIIM_PATH = Path(__file__).resolve().parent.parent / "biim"
 if BIIM_PATH.exists():
     sys.path.insert(0, str(BIIM_PATH))
 
