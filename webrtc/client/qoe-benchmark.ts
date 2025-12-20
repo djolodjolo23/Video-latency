@@ -1,6 +1,6 @@
 /**
  * Multi-Client QoE Benchmark for WebRTC
- * Usage: npx tsx webrtc/client/qoe-benchmark.ts --clients 10 --duration 60 --page http://localhost:8080/
+ * Usage: npx tsx webrtc/client/qoe-benchmark.ts --clients 10 --duration 60 --stream http://localhost:8080/
  */
 
 import fs from "node:fs";
@@ -22,7 +22,7 @@ class QoEBenchmark {
     console.log("=".repeat(60));
     console.log(`  Clients:    ${this.config.numClients}`);
     console.log(`  Duration:   ${this.config.durationSec} seconds`);
-    console.log(`  Page:       ${this.config.pageUrl}`);
+    console.log(`  Stream:     ${this.config.pageUrl}`);
     console.log(`  Output:     ${this.config.outputDir}`);
     console.log(`  Browsers:   ${this.config.numBrowsers}`);
     console.log(`  TTFF timeout: ${this.config.ttffTimeoutMs} ms`);
