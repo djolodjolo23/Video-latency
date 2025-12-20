@@ -1,12 +1,43 @@
 import argparse
 import asyncio
+import json
 import logging
+import time
 from typing import Dict, Optional, Set
 
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer, MediaRelay
 from aiortc.mediastreams import MediaStreamTrack
 from aiortc.sdp import candidate_from_sdp
+
+
+class TimestampedVideoTrack(MediaStreamTrack):
+    kind = "video"
+
+    def __init__(self, source: MediaStreamTrack) -> None:
+        super().__init__()
+        self.source = source
+        self._channel = None
+
+    def set_data_channel(self, channel) -> None:
+        self._channel = channel
+
+    async def recv(self):
+        frame = await self.source.recv()
+        if self._channel and self._channel.readyState == "open":
+            pts = frame.pts
+            time_base = frame.time_base
+            if pts is not None and time_base is not None:
+                payload = {
+                    "type": "frame_ts",
+                    "pts": float(pts * time_base),
+                    "sendTimeMs": int(time.time() * 1000),
+                }
+                try:
+                    self._channel.send(json.dumps(payload))
+                except Exception:
+                    logging.exception("Failed to send frame timestamp over data channel")
+        return frame
 
 
 class WebRTCPeerManager:
@@ -43,6 +74,7 @@ class WebRTCPeerManager:
         self, offer: RTCSessionDescription, sid: Optional[str] = None
     ) -> RTCPeerConnection:
         pc = RTCPeerConnection()
+        timestamped_video: Optional[TimestampedVideoTrack] = None
         if sid:
             self.peers_by_sid[sid] = pc
             self.remote_end_of_candidates.discard(sid)
@@ -63,6 +95,13 @@ class WebRTCPeerManager:
             async def on_ended() -> None:
                 logging.info("Track %s ended", track.id)
 
+        @pc.on("datachannel")
+        def on_datachannel(channel) -> None:
+            logging.info("Data channel created: %s", channel.label)
+
+            if channel.label == "qoe" and timestamped_video:
+                timestamped_video.set_data_channel(channel)
+
         audio, video = self._subscribe_tracks()
         if audio is None and video is None:
             logging.warning("No media source available; answering without media tracks")
@@ -75,7 +114,8 @@ class WebRTCPeerManager:
                 raise Exception("You must specify the audio codec using --audio-codec")
 
         if video:
-            video_sender = pc.addTrack(video)
+            timestamped_video = TimestampedVideoTrack(video)
+            video_sender = pc.addTrack(timestamped_video)
             if self.config.video_codec:
                 self._force_codec(pc, video_sender, self.config.video_codec)
             elif self.config.play_without_decoding:

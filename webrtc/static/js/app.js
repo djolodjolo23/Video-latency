@@ -3,11 +3,24 @@ import { createLogger } from "./logging.js";
 const remoteVideo = document.getElementById("remoteVideo");
 const logEl = document.getElementById("logs");
 
+const params = new URLSearchParams(location.search);
+const CLIENT_ID = params.get("clientId") || "0";
+
 const log = createLogger(logEl);
 const socket = io();
 
 let pc;
+let qoeChannel;
 // let offerSent = false;
+
+function logFrameTimestamp(payload) {
+  const pts = payload?.pts;
+  const sendTimeMs = payload?.sendTimeMs;
+  if (typeof pts !== "number" || typeof sendTimeMs !== "number") {
+    return;
+  }
+  console.log(`FRAME_TS pts=${pts.toFixed(6)}s sendTimeMs=${sendTimeMs}`);
+}
 
 socket.on("connect", () => {
   log("Socket.IO connected");
@@ -36,6 +49,21 @@ function createPeerConnection() {
   const nextPc = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
+  qoeChannel = nextPc.createDataChannel("qoe");
+  qoeChannel.onopen = () => {
+    log("Timestamp channel open");
+  };
+  qoeChannel.onmessage = (event) => {
+    if (typeof event.data !== "string") return;
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload?.type === "frame_ts") {
+        logFrameTimestamp(payload);
+      }
+    } catch (err) {
+      console.log("FRAME_TS invalid payload", err);
+    }
+  };
   // offerSent = false; // reset state for new connection not implemented yet
   nextPc.onicecandidate = (event) => {
     if (event.candidate) {
