@@ -9,8 +9,8 @@ import fs from 'node:fs';
 import puppeteer, { Browser } from 'puppeteer-core';
 import { Config, parseArgs } from './qoe-config.js';
 import { QoEClient } from './qoe-client.js';
-import { generateReports } from './qoe-reporter.js';
-import { ClientMetrics } from './qoe-types.js';
+import { generateReports } from '../../commons/qoe/qoe-reporter.js';
+import { ClientMetrics } from '../../commons/qoe/qoe-types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
