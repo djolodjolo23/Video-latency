@@ -10,7 +10,8 @@
     "qoe": "npx tsx ll-hls/client/qoe-benchmark.ts",
     "qoe:5": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 5",
     "qoe:10": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 10",
-    "qoe:20": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 20"
+    "qoe:20": "npx tsx ll-hls/client/qoe-benchmark.ts --clients 20",
+    "qoe:webrtc": "npx tsx webrtc/client/qoe-benchmark.ts"
   },
   "keywords": [],
   "author": "",
