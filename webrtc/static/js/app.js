@@ -8,7 +8,7 @@ const params = new URLSearchParams(location.search);
 const CLIENT_ID = params.get("clientId") || "0";
 
 const log = createLogger(logEl);
-const socket = io();
+const socket = io({ query: { clientId: CLIENT_ID } });
 
 remoteVideo.muted = true;
 
@@ -16,6 +16,7 @@ let pc;
 let qoeTimer;
 let qoeChannel;
 let timeSyncTimer;
+let hasShutdown = false;
 const frameQueue = [];
 const FRAME_MATCH_TOLERANCE_SEC = 0.05;
 let lastRenderedFrame = null;
@@ -176,6 +177,55 @@ function sendTimeSync() {
   const payload = { type: "time_sync", clientSendMs: Date.now() };
   qoeChannel.send(JSON.stringify(payload));
 }
+
+function shutdownConnection() {
+  if (hasShutdown) return;
+  hasShutdown = true;
+
+  if (timeSyncTimer) {
+    clearInterval(timeSyncTimer);
+    timeSyncTimer = null;
+  }
+  if (qoeTimer) {
+    clearInterval(qoeTimer);
+    qoeTimer = null;
+  }
+  if (qoeChannel) {
+    try {
+      qoeChannel.close();
+    } catch (err) {
+      log(`QoE channel close failed: ${err.message}`);
+    }
+    qoeChannel = null;
+  }
+  if (pc) {
+    pc.getTransceivers().forEach((transceiver) => {
+      if (transceiver.sender && transceiver.sender.track) {
+        transceiver.sender.track.stop();
+      }
+      if (transceiver.receiver && transceiver.receiver.track) {
+        transceiver.receiver.track.stop();
+      }
+    });
+    try {
+      pc.close();
+    } catch (err) {
+      log(`Peer connection close failed: ${err.message}`);
+    }
+    pc = null;
+  }
+  if (remoteVideo.srcObject) {
+    remoteVideo.srcObject = null;
+  }
+  qoeState.isPlaying = false;
+  if (socket && socket.connected) {
+    socket.disconnect();
+  }
+}
+
+window.__qoeShutdown = shutdownConnection;
+window.addEventListener("pagehide", shutdownConnection);
+window.addEventListener("beforeunload", shutdownConnection);
 
 function onVideoFrame(_now, metadata) {
   const renderTimeMs = Date.now();

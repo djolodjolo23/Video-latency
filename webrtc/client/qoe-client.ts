@@ -79,7 +79,17 @@ export class QoEClient {
       this.ttffTimer = null;
     }
     if (this.page) {
-      await this.page.close();
+      try {
+        await this.page.evaluate(() => {
+          const shutdown = (window as any).__qoeShutdown;
+          if (typeof shutdown === "function") {
+            shutdown();
+          }
+        });
+      } catch {
+        // ignore failures during shutdown
+      }
+      await this.page.close({ runBeforeUnload: true });
     }
   }
 
