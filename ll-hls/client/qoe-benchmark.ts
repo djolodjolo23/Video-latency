@@ -185,17 +185,21 @@ class QoEBenchmark {
         const browser = await puppeteer.launch({
           headless: this.config.headless,
           executablePath,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-web-security',           // Allow file:// to fetch http://
-            '--disable-features=IsolateOrigins', // Disable origin isolation
-            '--disable-site-isolation-trials',   // Disable site isolation
-            '--allow-file-access-from-files',    // Allow file:// origins to access other files
-          ],
-        });
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-web-security',           // Allow file:// to fetch http://
+          '--disable-features=IsolateOrigins', // Disable origin isolation
+          '--disable-site-isolation-trials',   // Disable site isolation
+          '--allow-file-access-from-files',    // Allow file:// origins to access other files
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-features=CalculateNativeWinOcclusion',
+        ],
+      });
         this.browsers.push(browser);
         console.log(`  Browser ${b} ready`);
       }

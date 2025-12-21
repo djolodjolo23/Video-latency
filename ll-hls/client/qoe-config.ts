@@ -21,6 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function parseArgs(): Config {
   const args = process.argv.slice(2);
+  let browsersExplicit = false;
   const config: Config = {
     numClients: 1,
     durationSec: 60,
@@ -63,6 +64,7 @@ export function parseArgs(): Config {
         break;
       case '--browsers':
         config.numBrowsers = parseInt(args[++i], 10);
+        browsersExplicit = true;
         break;
       case '--ttff-timeout':
         config.ttffTimeoutMs = parseInt(args[++i], 10);
@@ -113,5 +115,8 @@ Options:
     config.systemMetricsOutput = path.join(config.outputDir, 'system_metrics.csv');
   }
 
+  if (!browsersExplicit) {
+    config.numBrowsers = config.numClients;
+  }
   return config;
 }

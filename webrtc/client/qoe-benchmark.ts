@@ -187,6 +187,7 @@ class QoEBenchmark {
           "--disable-background-timer-throttling",
           "--disable-backgrounding-occluded-windows",
           "--disable-renderer-backgrounding",
+          "--disable-features=CalculateNativeWinOcclusion",
         ],
       });
         this.browsers.push(browser);
