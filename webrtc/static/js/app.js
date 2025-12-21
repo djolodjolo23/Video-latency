@@ -3,6 +3,11 @@ import { createLogger } from "./logging.js";
 const remoteVideo = document.getElementById("remoteVideo");
 const logEl = document.getElementById("logs");
 const qoeEl = document.getElementById("qoeStats");
+const DEBUG_QOE = new URLSearchParams(window.location.search).has("qoeDebug");
+const USE_JITTER_LATENCY = true;
+const DEBUG_LAG_THRESHOLD_MS = 200;
+const DEBUG_LATENCY_THRESHOLD_MS = 200;
+const MAX_FRAME_TS_LAG_MS = 200;
 
 const params = new URLSearchParams(location.search);
 const CLIENT_ID = params.get("clientId") || "0";
@@ -117,6 +122,9 @@ function handleStallEnd() {
 }
 
 function recordLatencySample(latencyMs, source) {
+  if (USE_JITTER_LATENCY && source !== "jitter") {
+    return;
+  }
   if (source === "jitter" && qoeState.latencySource === "e2e") {
     return;
   }
@@ -126,6 +134,16 @@ function recordLatencySample(latencyMs, source) {
     qoeState.latencySource = "jitter";
   }
   qoeState.currentLatencyMs = latencyMs;
+  if (DEBUG_QOE && latencyMs > DEBUG_LATENCY_THRESHOLD_MS && source !== "e2e") {
+    console.log(
+      "[QOE DEBUG] latency spike",
+      JSON.stringify({
+        source,
+        latencyMs,
+        clockOffsetMs: qoeState.clockOffsetMs,
+      })
+    );
+  }
   qoeState.latencySamples.push(latencyMs);
   if (qoeState.latencySamples.length > 60) {
     qoeState.latencySamples.shift();
@@ -143,15 +161,63 @@ function updateClockOffset(offsetMs) {
 }
 
 function handleFrameTimestamp(payload) {
+  if (USE_JITTER_LATENCY) {
+    return;
+  }
   const pts = payload?.pts;
   const sendTimeMs = payload?.sendTimeMs;
   if (typeof pts !== "number" || typeof sendTimeMs !== "number") {
     return;
   }
+  const nowMs = Date.now();
+  const deltaMs = nowMs - sendTimeMs;
+  if (deltaMs > MAX_FRAME_TS_LAG_MS) {
+    if (DEBUG_QOE) {
+      console.log(
+        "[QOE DEBUG] frame_ts dropped",
+        JSON.stringify({
+          clientNowMs: nowMs,
+          sendTimeMs,
+          lagMs: deltaMs,
+          clockOffsetMs: qoeState.clockOffsetMs,
+          queueSize: frameQueue.length,
+        })
+      );
+    }
+    return;
+  }
+  if (DEBUG_QOE) {
+    if (deltaMs > DEBUG_LAG_THRESHOLD_MS) {
+      console.log(
+        "[QOE DEBUG] frame_ts lag",
+        JSON.stringify({
+          clientNowMs: nowMs,
+          sendTimeMs,
+          lagMs: deltaMs,
+          clockOffsetMs: qoeState.clockOffsetMs,
+          queueSize: frameQueue.length,
+        })
+      );
+    }
+  }
   if (lastRenderedFrame && Math.abs(lastRenderedFrame.mediaTime - pts) <= FRAME_MATCH_TOLERANCE_SEC) {
     const offsetMs = qoeState.clockOffsetMs || 0;
     const latencyMs = lastRenderedFrame.renderTimeMs - (sendTimeMs - offsetMs);
     recordLatencySample(latencyMs, "e2e");
+    if (DEBUG_QOE && latencyMs > DEBUG_LATENCY_THRESHOLD_MS) {
+      console.log(
+        "[QOE DEBUG] e2e latency spike",
+        JSON.stringify({
+          latencyMs,
+          clientNowMs: renderTimeMs,
+          sendTimeMs,
+          clockOffsetMs: offsetMs,
+          pts,
+          mediaTime: lastRenderedFrame.mediaTime,
+          queueSize: frameQueue.length,
+        })
+      );
+    }
     return;
   }
   frameQueue.push({ pts, sendTimeMs });
@@ -169,6 +235,19 @@ function handleTimeSyncReply(payload) {
     return;
   }
   const offsetMs = ((t2 - t1) + (t3 - t4)) / 2;
+  if (DEBUG_QOE) {
+    console.log(
+      "[QOE DEBUG] time_sync",
+      JSON.stringify({
+        t1,
+        t2,
+        t3,
+        t4,
+        offsetMs,
+        rttMs: (t4 - t1) - (t3 - t2),
+      })
+    );
+  }
   updateClockOffset(offsetMs);
 }
 
@@ -241,8 +320,40 @@ function onVideoFrame(_now, metadata) {
   if (frameQueue.length && Math.abs(frameQueue[0].pts - mediaTime) <= FRAME_MATCH_TOLERANCE_SEC) {
     const match = frameQueue.shift();
     const offsetMs = qoeState.clockOffsetMs || 0;
+    const matchLagMs = renderTimeMs - match.sendTimeMs;
+    if (matchLagMs > MAX_FRAME_TS_LAG_MS) {
+      if (DEBUG_QOE) {
+        console.log(
+          "[QOE DEBUG] frame_ts match dropped",
+          JSON.stringify({
+            clientNowMs: renderTimeMs,
+            sendTimeMs: match.sendTimeMs,
+            lagMs: matchLagMs,
+            clockOffsetMs: offsetMs,
+            pts: match.pts,
+            mediaTime,
+            queueSize: frameQueue.length,
+          })
+        );
+      }
+      return;
+    }
     const latencyMs = renderTimeMs - (match.sendTimeMs - offsetMs);
     recordLatencySample(latencyMs, "e2e");
+    if (DEBUG_QOE && latencyMs > DEBUG_LATENCY_THRESHOLD_MS) {
+      console.log(
+        "[QOE DEBUG] e2e latency spike",
+        JSON.stringify({
+          latencyMs,
+          clientNowMs: renderTimeMs,
+          sendTimeMs: match.sendTimeMs,
+          clockOffsetMs: offsetMs,
+          pts: match.pts,
+          mediaTime,
+          queueSize: frameQueue.length,
+        })
+      );
+    }
   }
 
   if (typeof remoteVideo.requestVideoFrameCallback === "function") {
@@ -258,6 +369,8 @@ async function collectStats() {
   try {
     const stats = await pc.getStats();
     let jitterBufferDelayMs = null;
+    let jitterBufferDelay = null;
+    let jitterBufferEmittedCount = null;
     let selectedPairId = null;
 
     stats.forEach((report) => {
@@ -267,6 +380,8 @@ async function collectStats() {
           typeof report.jitterBufferEmittedCount === "number" &&
           report.jitterBufferEmittedCount > 0
         ) {
+          jitterBufferDelay = report.jitterBufferDelay;
+          jitterBufferEmittedCount = report.jitterBufferEmittedCount;
           jitterBufferDelayMs =
             (report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000;
         }
@@ -284,6 +399,21 @@ async function collectStats() {
     }
 
     if (jitterBufferDelayMs !== null) {
+      if (
+        DEBUG_QOE &&
+        jitterBufferDelayMs > DEBUG_LATENCY_THRESHOLD_MS &&
+        jitterBufferDelay !== null &&
+        jitterBufferEmittedCount !== null
+      ) {
+        console.log(
+          "[QOE DEBUG] jitter latency spike",
+          JSON.stringify({
+            jitterBufferDelayMs,
+            jitterBufferDelay,
+            jitterBufferEmittedCount,
+          })
+        );
+      }
       recordLatencySample(jitterBufferDelayMs, "jitter");
     }
 
@@ -338,7 +468,10 @@ function createPeerConnection() {
   const nextPc = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
-  qoeChannel = nextPc.createDataChannel("qoe");
+  qoeChannel = nextPc.createDataChannel("qoe", {
+    ordered: false,
+    maxRetransmits: 0,
+  });
   qoeChannel.onopen = () => {
     log("QoE data channel opened");
     sendTimeSync();

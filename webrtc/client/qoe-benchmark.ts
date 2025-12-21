@@ -178,14 +178,17 @@ class QoEBenchmark {
         const browser = await puppeteer.launch({
           headless: this.config.headless,
           executablePath,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--autoplay-policy=no-user-gesture-required",
-          ],
-        });
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--autoplay-policy=no-user-gesture-required",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+        ],
+      });
         this.browsers.push(browser);
         console.log(`  Browser ${b} ready`);
       }
