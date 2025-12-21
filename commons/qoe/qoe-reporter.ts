@@ -11,8 +11,17 @@ export interface ReportConfig {
 interface AggregateStats {
   allTTFF: number[];
   allLatencies: number[];
+  p50Latency: number;
+  p95Latency: number;
+  medianClientP50Latency: number;
+  medianClientP95Latency: number;
   avgStallsPerClient: number;
   avgStallTimePerClient: number;
+  totalStalls: number;
+  totalStallTime: number;
+  pctClientsWithStall: number;
+  p50StallMsPerClient: number;
+  p95StallMsPerClient: number;
   totalErrors: number;
 }
 
@@ -58,14 +67,51 @@ export function generateReports(allMetrics: ClientMetrics[], config: ReportConfi
 function computeAggregates(allMetrics: ClientMetrics[]): AggregateStats {
   const allTTFF = allMetrics.map(m => m.ttffMs).filter((t): t is number => t !== null);
   const allLatencies = allMetrics.flatMap(m => m.latencySamples).filter(l => !isNaN(l));
+  const sortedLatencies = [...allLatencies].sort((a, b) => a - b);
+  const p50Latency = percentile(sortedLatencies, 0.5);
+  const p95Latency = percentile(sortedLatencies, 0.95);
+  const clientP50Latencies = allMetrics.map(m => {
+    const samples = m.latencySamples.filter(l => !isNaN(l));
+    if (!samples.length) return 0;
+    samples.sort((a, b) => a - b);
+    return percentile(samples, 0.5);
+  }).sort((a, b) => a - b);
+  const clientP95Latencies = allMetrics.map(m => {
+    const samples = m.latencySamples.filter(l => !isNaN(l));
+    if (!samples.length) return 0;
+    samples.sort((a, b) => a - b);
+    return percentile(samples, 0.95);
+  }).sort((a, b) => a - b);
+  const medianClientP50Latency = percentile(clientP50Latencies, 0.5);
+  const medianClientP95Latency = percentile(clientP95Latencies, 0.5);
+  const clientCount = allMetrics.length || 1;
   const totalStalls = allMetrics.reduce((sum, m) => sum + m.stallCount, 0);
   const totalStallTime = allMetrics.reduce((sum, m) => sum + m.totalStallDurationMs, 0);
-  const clientCount = allMetrics.length || 1;
   const avgStallsPerClient = totalStalls / clientCount;
   const avgStallTimePerClient = totalStallTime / clientCount;
+  const clientsWithStall = allMetrics.filter(m => m.stallCount > 0).length;
+  const pctClientsWithStall = (clientsWithStall / clientCount) * 100;
+  const stallMsPerClient = allMetrics.map(m => m.totalStallDurationMs).sort((a, b) => a - b);
+  const p50StallMsPerClient = percentile(stallMsPerClient, 0.5);
+  const p95StallMsPerClient = percentile(stallMsPerClient, 0.95);
   const totalErrors = allMetrics.reduce((sum, m) => sum + m.errors.length, 0);
 
-  return { allTTFF, allLatencies, avgStallsPerClient, avgStallTimePerClient, totalErrors };
+  return {
+    allTTFF,
+    allLatencies,
+    p50Latency,
+    p95Latency,
+    medianClientP50Latency,
+    medianClientP95Latency,
+    avgStallsPerClient,
+    avgStallTimePerClient,
+    totalStalls,
+    totalStallTime,
+    pctClientsWithStall,
+    p50StallMsPerClient,
+    p95StallMsPerClient,
+    totalErrors,
+  };
 }
 
 function writeAggregateRow(agg: AggregateStats, config: ReportConfig, timestamp: string): void {
@@ -77,12 +123,26 @@ function writeAggregateRow(agg: AggregateStats, config: ReportConfig, timestamp:
   const minLatency = agg.allLatencies.length > 0 ? Math.min(...agg.allLatencies) : 0;
   const maxLatency = agg.allLatencies.length > 0 ? Math.max(...agg.allLatencies) : 0;
 
-  const aggregateRow = `${timestamp},${config.numClients},${config.durationSec},${avgTTFF.toFixed(1)},${avgLatency.toFixed(1)},${minLatency.toFixed(1)},${maxLatency.toFixed(1)},${agg.avgStallsPerClient.toFixed(2)},${agg.avgStallTimePerClient.toFixed(0)},${agg.totalErrors}\n`;
+  const aggregateRow = `${timestamp},${config.numClients},${config.durationSec},${avgTTFF.toFixed(1)},${avgLatency.toFixed(1)},${minLatency.toFixed(1)},${maxLatency.toFixed(1)},${agg.p50Latency.toFixed(1)},${agg.p95Latency.toFixed(1)},${agg.medianClientP50Latency.toFixed(1)},${agg.medianClientP95Latency.toFixed(1)},${agg.avgStallsPerClient.toFixed(2)},${agg.avgStallTimePerClient.toFixed(0)},${agg.totalStalls},${agg.totalStallTime.toFixed(0)},${agg.pctClientsWithStall.toFixed(1)},${agg.p50StallMsPerClient.toFixed(0)},${agg.p95StallMsPerClient.toFixed(0)},${agg.totalErrors}\n`;
 
   if (!aggregateExists) {
-    fs.writeFileSync(aggregatePath, 'timestamp,num_clients,duration_sec,avg_ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,avg_stalls_per_client,avg_stall_ms_per_client,total_errors\n' + aggregateRow);
+    fs.writeFileSync(
+      aggregatePath,
+      'timestamp,num_clients,duration_sec,avg_ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,p50_latency_ms,p95_latency_ms,median_client_p50_latency_ms,median_client_p95_latency_ms,avg_stalls_per_client,avg_stall_ms_per_client,total_stalls,total_stall_ms,pct_clients_with_stall,p50_stall_ms_per_client,p95_stall_ms_per_client,total_errors\n' +
+        aggregateRow
+    );
   } else {
     fs.appendFileSync(aggregatePath, aggregateRow);
   }
   console.log(`  Aggregate CSV: ${aggregatePath}`);
+}
+
+function percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const rank = Math.max(0, Math.min(values.length - 1, (values.length - 1) * p));
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return values[lower];
+  const weight = rank - lower;
+  return values[lower] * (1 - weight) + values[upper] * weight;
 }

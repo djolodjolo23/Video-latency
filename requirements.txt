@@ -1,0 +1,10 @@
+aiohttp
+aiortc
+python-socketio[client]
+psutil>=5.9.0
+inotify-simple>=1.3.5
+aiohttp>=3.8.0
+psutil>=5.9.0
+matplotlib
+seaborn
+pandas

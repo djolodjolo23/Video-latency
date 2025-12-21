@@ -6,6 +6,8 @@ export class QoEClient {
   private metrics: ClientMetrics;
   private currentSecondData: Partial<SecondMetrics> = {};
   private ttffTimer: NodeJS.Timeout | null = null;
+  private lastLatencySpikeMs: number | null = null;
+  private static readonly LATENCY_SPIKE_THRESHOLD_MS = 200;
 
   constructor(
     private clientId: number,
@@ -44,6 +46,10 @@ export class QoEClient {
         } catch {
           // ignore malformed JSON
         }
+        return;
+      }
+      if (text.startsWith("[QOE DEBUG]")) {
+        console.log(`[Client ${this.clientId}] ${text}`);
       }
     });
 
@@ -52,6 +58,12 @@ export class QoEClient {
     });
 
     const url = new URL(this.pageUrl);
+    if (!url.searchParams.has("qoeLatency")) {
+      url.searchParams.set("qoeLatency", "e2e");
+    }
+    if (!url.searchParams.has("qoeE2eStrict")) {
+      url.searchParams.set("qoeE2eStrict", "1");
+    }
     url.searchParams.set("clientId", String(this.clientId));
     await this.page.goto(url.href, { waitUntil: "load" });
   }
@@ -89,7 +101,11 @@ export class QoEClient {
       } catch {
         // ignore failures during shutdown
       }
-      await this.page.close({ runBeforeUnload: true });
+      try {
+        await this.page.close({ runBeforeUnload: true });
+      } catch {
+        // ignore close failures if the browser is already gone
+      }
     }
   }
 
@@ -127,6 +143,24 @@ export class QoEClient {
           bufferAheadSec: 0,
           isStalling: event.isStalling,
         };
+        const currentLatencyMs = event.currentLatencyMs;
+        if (
+          typeof currentLatencyMs === "number" &&
+          currentLatencyMs > QoEClient.LATENCY_SPIKE_THRESHOLD_MS &&
+          currentLatencyMs !== this.lastLatencySpikeMs
+        ) {
+          this.lastLatencySpikeMs = currentLatencyMs;
+          console.log(
+            `[Client ${this.clientId}] [QOE DEBUG] stats latency spike ` +
+              JSON.stringify({
+                latencyMs: currentLatencyMs,
+                latencySource: event.latencySource,
+                clockOffsetMs: event.clockOffsetMs,
+                rttMs: event.rttMs,
+                second,
+              })
+          );
+        }
         break;
       }
       case "error":
