@@ -207,7 +207,19 @@ function handleFrameTimestamp(payload) {
   }
   if (lastRenderedFrame && Math.abs(lastRenderedFrame.mediaTime - pts) <= FRAME_MATCH_TOLERANCE_SEC) {
     const offsetMs = qoeState.clockOffsetMs || 0;
-    const latencyMs = lastRenderedFrame.renderTimeMs - (sendTimeMs - offsetMs);
+    const latencyMs = lastRenderedFrame.renderTimeMs - (sendTimeMs + offsetMs);
+    if (DEBUG_QOE) {
+      console.log(
+        "[QOE DEBUG] e2e latency (handleFrameTimestamp)",
+        JSON.stringify({
+          renderTimeMs: lastRenderedFrame.renderTimeMs,
+          sendTimeMs,
+          offsetMs,
+          latencyMs,
+          pts,
+        })
+      );
+    }
     recordLatencySample(latencyMs, "e2e");
     return;
   }
@@ -345,7 +357,20 @@ function onVideoFrame(_now, metadata) {
       }
       return;
     }
-    const latencyMs = renderTimeMs - (match.sendTimeMs - offsetMs);
+    const latencyMs = renderTimeMs - (match.sendTimeMs + offsetMs);
+    if (DEBUG_QOE) {
+      console.log(
+        "[QOE DEBUG] e2e latency (onVideoFrame)",
+        JSON.stringify({
+          renderTimeMs,
+          sendTimeMs: match.sendTimeMs,
+          offsetMs,
+          latencyMs,
+          pts: match.pts,
+          mediaTime,
+        })
+      );
+    }
     recordLatencySample(latencyMs, "e2e");
   }
 
