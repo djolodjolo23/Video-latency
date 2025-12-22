@@ -42,6 +42,7 @@ class ServerMetricsMonitor:
         interval: float,
         duration: float,
         output_path: Path,
+        net_interface: Optional[str] = None,
         proc_pid: Optional[int] = None,
     ) -> None:
         self.expected_clients = expected_clients
@@ -50,13 +51,27 @@ class ServerMetricsMonitor:
         self.interval = interval
         self.duration = duration
         self.output_path = output_path
+        self.net_interface = net_interface
         self.proc = psutil.Process(proc_pid or os.getpid())
+        self.ffmpeg_proc: Optional[psutil.Process] = None
         self._started = False
         self._start_ts = None
         self._samples: list[dict[str, float]] = []
-        self._prev_net = psutil.net_io_counters()
+        self._net_interface_missing_logged = False
+        self._prev_net = self._get_net_counters()
         psutil.cpu_percent(interval=None)
         self.proc.cpu_percent(interval=None)
+
+    def set_ffmpeg_pid(self, pid: Optional[int]) -> None:
+        if pid is None:
+            self.ffmpeg_proc = None
+            return
+        try:
+            self.ffmpeg_proc = psutil.Process(pid)
+            self.ffmpeg_proc.cpu_percent(interval=None)
+        except Exception:
+            LOG.exception("Failed to attach FFmpeg process metrics")
+            self.ffmpeg_proc = None
 
     def mark_client(self, client_id: str) -> None:
         _CLIENT_LAST_SEEN[client_id] = time.monotonic()
@@ -67,6 +82,21 @@ class ServerMetricsMonitor:
         for cid in stale:
             _CLIENT_LAST_SEEN.pop(cid, None)
         return len(_CLIENT_LAST_SEEN)
+
+    def _get_net_counters(self) -> psutil._common.snetio:
+        if not self.net_interface:
+            return psutil.net_io_counters()
+        pernic = psutil.net_io_counters(pernic=True)
+        counters = pernic.get(self.net_interface)
+        if counters:
+            return counters
+        if not self._net_interface_missing_logged:
+            LOG.warning(
+                "Network interface '%s' not found; using host-wide counters",
+                self.net_interface,
+            )
+            self._net_interface_missing_logged = True
+        return psutil.net_io_counters()
 
     async def run(self) -> None:
         if self.expected_clients <= 0:
@@ -100,9 +130,18 @@ class ServerMetricsMonitor:
     def _record_sample(self, connected: int) -> None:
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
-        proc_cpu = self.proc.cpu_percent(interval=None) / psutil.cpu_count()
-        proc_rss_mb = self.proc.memory_info().rss / (1024**2)
-        net = psutil.net_io_counters()
+        proc_cpu_raw = self.proc.cpu_percent(interval=None)
+        proc_rss = self.proc.memory_info().rss
+        if self.ffmpeg_proc:
+            try:
+                proc_cpu_raw += self.ffmpeg_proc.cpu_percent(interval=None)
+                proc_rss += self.ffmpeg_proc.memory_info().rss
+            except Exception:
+                LOG.warning("FFmpeg process metrics unavailable; using server process only")
+                self.ffmpeg_proc = None
+        proc_cpu = proc_cpu_raw / psutil.cpu_count()
+        proc_rss_mb = proc_rss / (1024**2)
+        net = self._get_net_counters()
         rx_delta = net.bytes_recv - self._prev_net.bytes_recv
         tx_delta = net.bytes_sent - self._prev_net.bytes_sent
         self._prev_net = net
@@ -244,6 +283,7 @@ async def run_pipeline(args) -> None:
         interval=args.metrics_interval,
         duration=args.metrics_duration,
         output_path=Path(args.metrics_output),
+        net_interface=args.metrics_net_interface,
     )
 
     # HTTP routes
@@ -288,6 +328,7 @@ async def run_pipeline(args) -> None:
     cmd = build_ffmpeg_command(args)
     LOG.info(f"FFmpeg: {' '.join(cmd)}")
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    monitor.set_ffmpeg_pid(proc.pid)
     
     # Log FFmpeg output
     async def log_stderr():
@@ -368,6 +409,7 @@ async def run_pipeline(args) -> None:
     except asyncio.CancelledError:
         LOG.info("Cancelled")
     finally:
+        monitor.set_ffmpeg_pid(None)
         proc.terminate()
         await proc.wait()
         await runner.cleanup()
@@ -379,7 +421,7 @@ def main():
     p.add_argument("--test-src", action="store_true")
     p.add_argument("--resolution", default="640x360", type=lambda x: tuple(map(int, x.split('x'))))
     p.add_argument("--framerate", default=30, type=int)
-    p.add_argument("--bitrate", default=1500, type=int)
+    p.add_argument("--bitrate", default=1000, type=int)
     p.add_argument("--gop", default=30, type=int, help="Keyframe interval")
     p.add_argument("--target-duration", default=1, type=int)
     p.add_argument("--part-duration", default=0.1, type=float)
@@ -391,6 +433,7 @@ def main():
     p.add_argument("--metrics-interval", type=float, default=1.0, help="Server metrics sampling interval in seconds")
     p.add_argument("--metrics-duration", type=float, default=30.0, help="Duration in seconds to collect server metrics once all clients connect")
     p.add_argument("--metrics-output", default="server_metrics.csv", help="Path for server metrics CSV output")
+    p.add_argument("--metrics-net-interface", default=None, help="Network interface name for metrics (e.g. eth0, lo). Defaults to host-wide counters.")
     args = p.parse_args()
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")

@@ -27,14 +27,17 @@ class ServerMetricsMonitor:
         interval: float,
         duration: float,
         output_path: Path,
+        net_interface: str | None = None,
     ) -> None:
         self.expected_clients = expected_clients
         self.connect_timeout = connect_timeout
         self.interval = interval
         self.duration = duration
         self.output_path = output_path
+        self.net_interface = net_interface
         self.proc = psutil.Process(os.getpid())
-        self._prev_net = psutil.net_io_counters()
+        self._net_interface_missing_logged = False
+        self._prev_net = self._get_net_counters()
         self._connected: set[str] = set()
         self._sid_to_client_id: dict[str, str] = {}
         self._started = False
@@ -64,6 +67,21 @@ class ServerMetricsMonitor:
     def _is_warmup(self, sid: str) -> bool:
         client_id = self._sid_to_client_id.get(sid, "")
         return client_id.startswith("warmup")
+
+    def _get_net_counters(self) -> psutil._common.snetio:
+        if not self.net_interface:
+            return psutil.net_io_counters()
+        pernic = psutil.net_io_counters(pernic=True)
+        counters = pernic.get(self.net_interface)
+        if counters:
+            return counters
+        if not self._net_interface_missing_logged:
+            logging.warning(
+                "Network interface '%s' not found; using host-wide counters",
+                self.net_interface,
+            )
+            self._net_interface_missing_logged = True
+        return psutil.net_io_counters()
 
     async def run(self) -> None:
         if self.expected_clients <= 0:
@@ -103,7 +121,7 @@ class ServerMetricsMonitor:
         mem = psutil.virtual_memory()
         proc_cpu = self.proc.cpu_percent(interval=None) / psutil.cpu_count()
         proc_rss_mb = self.proc.memory_info().rss / (1024**2)
-        net = psutil.net_io_counters()
+        net = self._get_net_counters()
         rx_delta = net.bytes_recv - self._prev_net.bytes_recv
         tx_delta = net.bytes_sent - self._prev_net.bytes_sent
         self._prev_net = net
@@ -174,6 +192,7 @@ def create_app(config, source=None) -> web.Application:
         interval=config.metrics_interval,
         duration=config.metrics_duration,
         output_path=Path(config.metrics_output),
+        net_interface=config.metrics_net_interface,
     )
 
     app = web.Application()

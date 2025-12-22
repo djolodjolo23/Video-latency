@@ -145,6 +145,15 @@ class WebRTCPeerManager:
         if video:
             timestamped_video = TimestampedVideoTrack(video)
             video_sender = pc.addTrack(timestamped_video)
+            if self.config.video_bitrate:
+                try:
+                    params = video_sender.getParameters()
+                    if not params.encodings:
+                        params.encodings = [{}]
+                    params.encodings[0]["maxBitrate"] = int(self.config.video_bitrate) * 1000
+                    await video_sender.setParameters(params)
+                except Exception:
+                    logging.exception("Failed to apply video bitrate constraint")
             if self.config.video_codec:
                 self._force_codec(pc, video_sender, self.config.video_codec)
             elif self.config.play_without_decoding:

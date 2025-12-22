@@ -36,16 +36,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--video-size",
-        default="640x480",
-        help="Frame size for the video device, e.g. 640x480.",
+        default="640x360",
+        help="Frame size for the video device, e.g. 640x360.",
     )
     parser.add_argument(
         "--framerate",
-        # default=30,
-        help="Capture framerate for the video device (e.g. 30). Leave unset to use the device default.",
+        default=30,
+        help="Capture framerate for the video device (e.g. 30).",
     )
     parser.add_argument("--audio-codec", help="Force a specific audio codec (e.g. audio/opus)")
     parser.add_argument("--video-codec", help="Force a specific video codec (e.g. video/H264)")
+    parser.add_argument(
+        "--video-bitrate",
+        type=int,
+        default=1000,
+        help="Target video bitrate in kbit/s (default: 1000)",
+    )
     parser.add_argument(
         "--expected-clients",
         type=int,
@@ -74,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics-output",
         default="server_metrics.csv",
         help="Path for server metrics CSV output",
+    )
+    parser.add_argument(
+        "--metrics-net-interface",
+        default=None,
+        help="Network interface name for metrics (e.g. eth0, lo). Defaults to host-wide counters.",
     )
     return parser
 
