@@ -5,7 +5,11 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "qoe:webrtc": "node scripts/qoe-webrtc.mjs",
+    "qoe:webrtc:range": "node scripts/qoe-webrtc-range.mjs",
+    "qoe:llhls": "node scripts/qoe-llhls.mjs",
+    "qoe:llhls:range": "node scripts/qoe-llhls-range.mjs"
   },
   "keywords": [],
   "author": "",

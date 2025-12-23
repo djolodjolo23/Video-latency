@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Browser, Page } from 'puppeteer-core';
-import { ClientMetrics, QoEEvent, SecondMetrics } from './qoe-types.js';
+import { ClientMetrics, QoEEvent, SecondMetrics } from '../../commons/qoe/qoe-types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,7 +29,23 @@ export class QoEClient {
   }
 
   async start(): Promise<void> {
-    this.page = await this.browser.newPage();
+    const maxAttempts = 5;
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        this.page = await this.browser.newPage();
+        break;
+      } catch (err) {
+        lastError = err;
+        if (attempt === maxAttempts) {
+          throw new Error("Failed to create page");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+    if (!this.page) {
+      throw lastError || new Error("Failed to create page");
+    }
 
     this.ttffTimer = setTimeout(() => {
       if (this.metrics.ttffMs === null) {
@@ -59,7 +75,24 @@ export class QoEClient {
     fileUrl.searchParams.set('src', this.streamUrl);
     fileUrl.searchParams.set('clientId', String(this.clientId));
     
-    await this.page.goto(fileUrl.href, { waitUntil: 'load' });
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await this.page.goto(fileUrl.href, { waitUntil: 'load' });
+        break;
+      } catch (err) {
+        lastError = err;
+        if (attempt === maxAttempts) {
+          throw err;
+        }
+        try {
+          await this.page.close();
+        } catch {
+          // ignore close failures
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        this.page = await this.browser.newPage();
+      }
+    }
   }
 
   recordSecond(second: number): SecondMetrics {
@@ -85,7 +118,11 @@ export class QoEClient {
       this.ttffTimer = null;
     }
     if (this.page) {
-      await this.page.close();
+      try {
+        await this.page.close();
+      } catch {
+        // ignore close failures if the browser is already gone
+      }
     }
   }
 

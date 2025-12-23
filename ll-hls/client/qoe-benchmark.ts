@@ -11,8 +11,8 @@ import { execSync } from 'node:child_process';
 import puppeteer, { Browser } from 'puppeteer-core';
 import { Config, parseArgs } from './qoe-config.js';
 import { QoEClient } from './qoe-client.js';
-import { generateReports } from './qoe-reporter.js';
-import { ClientMetrics } from './qoe-types.js';
+import { generateReports } from '../../commons/qoe/qoe-reporter.js';
+import { ClientMetrics } from '../../commons/qoe/qoe-types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -168,6 +168,29 @@ class QoEBenchmark {
           this.config.numClients
         )
       : null;
+    let shuttingDown = false;
+    const cleanup = async (exitCode?: number) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      if (monitor) {
+        monitor.stop();
+      }
+      for (const client of this.clients) {
+        await client.close();
+      }
+      for (const browser of this.browsers) {
+        await this.closeBrowser(browser);
+      }
+      if (exitCode !== undefined) {
+        process.exit(exitCode);
+      }
+    };
+    const handleSignal = (signal: NodeJS.Signals) => {
+      console.log(`\nReceived ${signal}. Shutting down...`);
+      void cleanup(130);
+    };
+    process.once('SIGINT', handleSignal);
+    process.once('SIGTERM', handleSignal);
 
     try {
       if (monitor) {
@@ -180,29 +203,12 @@ class QoEBenchmark {
         throw new Error('Set PUPPETEER_EXECUTABLE_PATH to your Chrome/Chromium binary');
       }
 
-      console.log('Launching browser(s)...');
-      for (let b = 0; b < this.config.numBrowsers; b++) {
-        const browser = await puppeteer.launch({
-          headless: this.config.headless,
-          executablePath,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-web-security',           // Allow file:// to fetch http://
-          '--disable-features=IsolateOrigins', // Disable origin isolation
-          '--disable-site-isolation-trials',   // Disable site isolation
-          '--allow-file-access-from-files',    // Allow file:// origins to access other files
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-features=CalculateNativeWinOcclusion',
-        ],
-      });
-        this.browsers.push(browser);
-        console.log(`  Browser ${b} ready`);
-      }
+    console.log('Launching browser(s)...');
+    for (let b = 0; b < this.config.numBrowsers; b++) {
+      const browser = await this.launchBrowser(executablePath);
+      this.browsers.push(browser);
+      console.log(`  Browser ${b} ready`);
+    }
 
     // must warmup, cold start causes spike on ttff
     if (this.config.warmup) {
@@ -221,12 +227,35 @@ class QoEBenchmark {
     // Launch clients with staggered delay
     console.log(`Launching ${this.config.numClients} clients across ${this.config.numBrowsers} browser(s)...`);
     for (let i = 0; i < this.config.numClients; i++) {
-      const browser = this.browsers[i % this.browsers.length];
-      const client = new QoEClient(i, browser, this.config.streamUrl, this.config.ttffTimeoutMs);
-      await client.start();
+      let browserIndex = i % this.browsers.length;
+      let browser = this.browsers[browserIndex];
+      let client: QoEClient | null = null;
+      let started = false;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          client = new QoEClient(i, browser, this.config.streamUrl, this.config.ttffTimeoutMs);
+          await client.start();
+          started = true;
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`  Client ${i} start failed (attempt ${attempt}): ${msg}`);
+          try {
+            await this.closeBrowser(browser);
+          } catch {
+            // ignore close failures
+          }
+          browser = await this.launchBrowser(executablePath);
+          this.browsers[browserIndex] = browser;
+          await this.sleep(300);
+        }
+      }
+      if (!started || !client) {
+        throw new Error(`Failed to start client ${i}`);
+      }
       this.clients.push(client);
       console.log(`  Client ${i} started`);
-      
+
       if (i < this.config.numClients - 1) {
         await this.sleep(this.config.staggerDelayMs);
       }
@@ -250,19 +279,14 @@ class QoEBenchmark {
 
       console.log();
       console.log('Benchmark complete. Collecting results...');
-      
+
       const allMetrics: ClientMetrics[] = this.clients.map(c => c.getMetrics());
       generateReports(allMetrics, this.config);
-      for (const client of this.clients) {
-        await client.close();
-      }
-      for (const browser of this.browsers) {
-        await browser.close();
-      }
+      await cleanup();
     } finally {
-      if (monitor) {
-        monitor.stop();
-      }
+      process.off('SIGINT', handleSignal);
+      process.off('SIGTERM', handleSignal);
+      await cleanup();
     }
   }
 
@@ -292,6 +316,46 @@ class QoEBenchmark {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async closeBrowser(browser: Browser): Promise<void> {
+    const proc = browser.process();
+    const timeoutMs = 5000;
+    try {
+      await Promise.race([
+        browser.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('close timeout')), timeoutMs)),
+      ]);
+    } catch {
+      if (proc && !proc.killed) {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // ignore kill failures
+        }
+      }
+    }
+  }
+
+  private async launchBrowser(executablePath: string): Promise<Browser> {
+    return puppeteer.launch({
+      headless: this.config.headless,
+      executablePath,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',           // Allow file:// to fetch http://
+        '--disable-features=IsolateOrigins', // Disable origin isolation
+        '--disable-site-isolation-trials',   // Disable site isolation
+        '--allow-file-access-from-files',    // Allow file:// origins to access other files
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=CalculateNativeWinOcclusion',
+      ],
+    });
   }
 }
 

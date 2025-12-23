@@ -95,7 +95,11 @@ export class QoEClient {
       } catch {
         // ignore failures during shutdown
       }
-      await this.page.close({ runBeforeUnload: true });
+      try {
+        await this.page.close({ runBeforeUnload: true });
+      } catch {
+        // ignore close failures if the browser is already gone
+      }
     }
   }
 
