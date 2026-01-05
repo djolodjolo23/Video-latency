@@ -187,7 +187,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run WebRTC server metrics for a range of expected client counts."
     )
-    parser.add_argument("--start", type=int, default=10, help="Starting expected client count")
+    parser.add_argument("--start", type=int, default=1, help="Starting expected client count")
     parser.add_argument("--end", type=int, default=50, help="Ending expected client count (inclusive)")
     parser.add_argument(
         "--connect-timeout",

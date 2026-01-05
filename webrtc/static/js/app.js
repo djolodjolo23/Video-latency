@@ -13,7 +13,11 @@ const params = new URLSearchParams(location.search);
 const CLIENT_ID = params.get("clientId") || "0";
 
 const log = createLogger(logEl);
-const socket = io({ query: { clientId: CLIENT_ID } });
+const socket = io({
+  query: { clientId: CLIENT_ID },
+  transports: ["websocket"],
+  upgrade: false,
+});
 
 remoteVideo.muted = true;
 
