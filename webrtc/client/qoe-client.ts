@@ -58,6 +58,12 @@ export class QoEClient {
     });
 
     const url = new URL(this.pageUrl);
+    if (!url.searchParams.has("qoeLatency")) {
+      url.searchParams.set("qoeLatency", "e2e");
+    }
+    if (!url.searchParams.has("qoeE2eStrict")) {
+      url.searchParams.set("qoeE2eStrict", "1");
+    }
     url.searchParams.set("clientId", String(this.clientId));
     await this.page.goto(url.href, { waitUntil: "load" });
   }

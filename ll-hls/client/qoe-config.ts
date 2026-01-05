@@ -25,7 +25,7 @@ export function parseArgs(): Config {
   const config: Config = {
     numClients: 1,
     durationSec: 60,
-    streamUrl: 'http://localhost:8080/live.m3u8',
+    streamUrl: 'http://192.168.0.93:8080/live.m3u8',
     outputDir: path.join(__dirname, 'qoe-results'),
     headless: true,
     staggerDelayMs: 0,

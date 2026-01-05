@@ -25,7 +25,7 @@ export function parseArgs(): Config {
   const config: Config = {
     numClients: 1,
     durationSec: 60,
-    pageUrl: "http://localhost:8080/",
+    pageUrl: "http://192.168.0.93:8080/",
     outputDir: path.join(__dirname, "qoe-results"),
     headless: true,
     staggerDelayMs: 0,
