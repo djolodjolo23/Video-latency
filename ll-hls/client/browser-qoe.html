@@ -20,6 +20,7 @@
     const params = new URLSearchParams(location.search);
     const STREAM_URL = params.get('src') || 'http://localhost:8080/live.m3u8';
     const CLIENT_ID = params.get('clientId') || '0';
+    const CLIENT_QUERY = CLIENT_ID ? `clientId=${encodeURIComponent(CLIENT_ID)}` : '';
     
     const video = document.getElementById('video');
     const statsEl = document.getElementById('stats');
@@ -57,9 +58,11 @@
     // ========== Timestamp Fetching ==========
     async function fetchTimestamps() {
       try {
-        const baseUrl = new URL(STREAM_URL).origin;
-        const url = `${baseUrl}/timestamps.json`;
-        const resp = await fetch(url, { mode: 'cors' });
+        const url = new URL('/timestamps.json', STREAM_URL);
+        if (CLIENT_ID) {
+          url.searchParams.set('clientId', CLIENT_ID);
+        }
+        const resp = await fetch(url.toString(), { mode: 'cors' });
         if (!resp.ok) {
           console.log('QOE ' + JSON.stringify({ type: 'debug', message: `Timestamp fetch failed: ${resp.status}` }));
           return;
@@ -160,6 +163,22 @@ Status: ${qoeState.isStalling ? '⏸ STALLING' : qoeState.isPlaying ? '▶ Playi
         maxBufferSize: 2 * 1000 * 1000,
         maxBufferHole: 0.1,
         abrEwmaDefaultEstimate: 5000000,
+        fetchSetup: (context, init) => {
+          if (!CLIENT_QUERY) {
+            return new Request(context.url, init);
+          }
+          const url = new URL(context.url, location.href);
+          if (!url.searchParams.has('clientId')) {
+            url.searchParams.set('clientId', CLIENT_ID);
+          }
+          return new Request(url.toString(), init);
+        },
+        xhrSetup: (xhr, url) => {
+          if (!CLIENT_QUERY) return;
+          if (url.includes("clientId=")) return;
+          const sep = url.includes("?") ? "&" : "?";
+          xhr.open("GET", `${url}${sep}${CLIENT_QUERY}`, true);
+        },
       });
 
       // ========== Video Element Events ==========
