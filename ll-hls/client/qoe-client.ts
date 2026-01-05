@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Browser, Page } from 'puppeteer-core';
-import { ClientMetrics, QoEEvent, SecondMetrics } from './qoe-types.js';
+import { ClientMetrics, QoEEvent, SecondMetrics } from '../../commons/qoe/qoe-types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
