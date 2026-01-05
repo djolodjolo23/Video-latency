@@ -1,0 +1,2 @@
+client_id,ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,stall_count,total_stall_ms,error_count
+0,243.5,2240.9,2204.8,2263.2,1,233,0

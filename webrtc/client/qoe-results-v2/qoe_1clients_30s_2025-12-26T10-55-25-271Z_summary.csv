@@ -1,0 +1,2 @@
+client_id,ttff_ms,avg_latency_ms,min_latency_ms,max_latency_ms,stall_count,total_stall_ms,error_count
+0,,,,,0,0,1
