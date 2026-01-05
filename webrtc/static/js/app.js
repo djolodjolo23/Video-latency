@@ -3,14 +3,15 @@ import { createLogger } from "./logging.js";
 const remoteVideo = document.getElementById("remoteVideo");
 const logEl = document.getElementById("logs");
 const qoeEl = document.getElementById("qoeStats");
-const DEBUG_QOE = new URLSearchParams(window.location.search).has("qoeDebug");
-const USE_JITTER_LATENCY = false;
+const params = new URLSearchParams(location.search);
+const DEBUG_QOE = params.has("qoeDebug");
+const LATENCY_MODE = params.get("qoeLatency") || "e2e";
+const E2E_STRICT = params.has("qoeE2eStrict");
+const CLIENT_ID = params.get("clientId") || "0";
+const USE_JITTER_LATENCY = LATENCY_MODE === "jitter";
 const FRAME_CALLBACK_DELAY_MS = 250;
 const FRAME_CALLBACK_FALLBACK_MS = 5000;
 const MAX_FRAME_TS_LAG_MS = 200;
-
-const params = new URLSearchParams(location.search);
-const CLIENT_ID = params.get("clientId") || "0";
 
 const log = createLogger(logEl);
 const socket = io({
@@ -89,7 +90,13 @@ function resetQoEState() {
 }
 
 function shouldUseJitter() {
-  return USE_JITTER_LATENCY || Date.now() < qoeState.forceJitterUntilMs;
+  if (USE_JITTER_LATENCY) {
+    return true;
+  }
+  if (E2E_STRICT) {
+    return false;
+  }
+  return Date.now() < qoeState.forceJitterUntilMs;
 }
 
 function formatMs(value, fallback = "-") {
