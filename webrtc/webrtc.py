@@ -48,6 +48,7 @@ class WebRTCPeerManager:
         self.pcs: Set[RTCPeerConnection] = set()
         self.peers_by_sid: Dict[str, RTCPeerConnection] = {}
         self.remote_end_of_candidates: Set[str] = set()
+        self._bitrate_unsupported_logged = False
 
     def _subscribe_tracks(
         self,
@@ -145,6 +146,21 @@ class WebRTCPeerManager:
         if video:
             timestamped_video = TimestampedVideoTrack(video)
             video_sender = pc.addTrack(timestamped_video)
+            if self.config.video_bitrate:
+                if hasattr(video_sender, "getParameters") and hasattr(video_sender, "setParameters"):
+                    try:
+                        params = video_sender.getParameters()
+                        if not params.encodings:
+                            params.encodings = [{}]
+                        params.encodings[0]["maxBitrate"] = int(self.config.video_bitrate) * 1000
+                        await video_sender.setParameters(params)
+                    except Exception:
+                        logging.exception("Failed to apply video bitrate constraint")
+                elif not self._bitrate_unsupported_logged:
+                    self._bitrate_unsupported_logged = True
+                    logging.warning(
+                        "RTCRtpSender does not support getParameters; bitrate constraint skipped"
+                    )
             if self.config.video_codec:
                 self._force_codec(pc, video_sender, self.config.video_codec)
             elif self.config.play_without_decoding:
