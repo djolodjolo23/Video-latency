@@ -1,16 +1,33 @@
 #!/usr/bin/env node
 const args = process.argv.slice(2);
-const startArg = args[0];
-const endArg = args[1];
+const numericArgs = [];
+let durationArg = null;
+for (let i = 0; i < args.length; i += 1) {
+  if (args[i] === "--duration" || args[i] === "-d") {
+    durationArg = args[i + 1] ?? null;
+    i += 1;
+    continue;
+  }
+  if (!args[i].startsWith("-")) {
+    numericArgs.push(args[i]);
+  }
+}
+const startArg = numericArgs[0];
+const endArg = numericArgs[1];
 const start = startArg ? Number.parseInt(startArg, 10) : 14;
 const end = endArg ? Number.parseInt(endArg, 10) : 30;
 
 if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end < start) {
-  console.error("Usage: npm run qoe:webrtc:range -- <start> <end>");
+  console.error("Usage: npm run qoe:webrtc:range -- <start> <end> [--duration <sec>]");
   process.exit(1);
 }
 
-const timeoutSec = Number.parseInt(process.env.QOE_TIMEOUT_SEC || "40", 10);
+const baseSec = Number.parseInt(process.env.QOE_BASE_SEC || "10", 10);
+const durationSec = Number.parseInt(durationArg || process.env.QOE_DURATION_SEC || "30", 10);
+const perClientSec = Number.parseFloat(process.env.QOE_CLIENT_SEC || "2");
+const fixedTimeoutSec = process.env.QOE_TIMEOUT_SEC
+  ? Number.parseInt(process.env.QOE_TIMEOUT_SEC, 10)
+  : null;
 const graceSec = Number.parseInt(process.env.QOE_GRACE_SEC || "10", 10);
 
 const { spawn } = await import("node:child_process");
@@ -57,14 +74,21 @@ process.on("SIGTERM", () => handleSignal("SIGTERM"));
 
 async function runOnce(clients) {
   return new Promise((resolve) => {
-    const child = spawn("node", ["scripts/qoe-webrtc.mjs", String(clients)], { stdio: "inherit" });
+    const child = spawn(
+      "node",
+      ["scripts/qoe-webrtc.mjs", String(clients), "--duration", String(durationSec)],
+      { stdio: "inherit" }
+    );
     currentChild = child;
     let timeout = null;
     let graceTimeout = null;
     let killed = false;
-    if (Number.isFinite(timeoutSec) && timeoutSec > 0) {
+    const computedTimeoutSec = fixedTimeoutSec ?? Math.ceil(durationSec + baseSec + perClientSec * clients);
+    if (Number.isFinite(computedTimeoutSec) && computedTimeoutSec > 0) {
       timeout = setTimeout(() => {
-        console.log(`\nTimeout after ${timeoutSec}s for ${clients} clients. Sending SIGINT...`);
+        console.log(
+          `\nTimeout after ${computedTimeoutSec}s for ${clients} clients. Sending SIGINT...`
+        );
         if (child.exitCode === null) {
           child.kill("SIGINT");
         }
@@ -75,7 +99,7 @@ async function runOnce(clients) {
             child.kill("SIGKILL");
           }
         }, Math.max(graceSec, 1) * 1000);
-      }, timeoutSec * 1000);
+      }, computedTimeoutSec * 1000);
     }
     child.on("exit", async (code, signal) => {
       if (timeout) clearTimeout(timeout);
